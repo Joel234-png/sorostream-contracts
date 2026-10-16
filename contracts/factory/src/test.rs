@@ -2,8 +2,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, BytesN, Env,
+    testutils::{Address as _, Ledger, Events},
+    Address, BytesN, Env, Symbol, Val,
 };
 
 // ---------------------------------------------------------------------------
@@ -217,4 +217,50 @@ fn test_deploy_multiple_contracts_all_listed_in_order() {
     assert_eq!(contracts.get(0).unwrap(), addr1);
     assert_eq!(contracts.get(1).unwrap(), addr2);
     assert_eq!(contracts.get(2).unwrap(), addr3);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — admin-transfer events (issue #769)
+// ---------------------------------------------------------------------------
+
+/// Confirms factory's AdminTransferProposed/AdminTransferAccepted events use the
+/// same topic name and single data field (`Address`) as governance's equivalent
+/// events, so off-chain indexers can handle "any SoroStream-family admin
+/// transfer" generically.
+#[test]
+fn test_factory_admin_transfer_events_match_governance_schema() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    c.initialize(&admin);
+
+    let new_admin = Address::generate(&env);
+
+    // ---- propose_admin emits AdminTransferProposed(new_admin) ----
+    c.propose_admin(&new_admin);
+    let all = env.events().all();
+    let proposed = all.iter().find(|(_, topics, _)| {
+        !topics.is_empty() && topics.get(0).unwrap() == Symbol::new(&env, "AdminTransferProposed")
+    }).expect("AdminTransferProposed event must be emitted");
+
+    let (_emitter, _topics, data) = proposed;
+    let data_val: Address = data.into_val(&env);
+    assert_eq!(data_val, new_admin, "AdminTransferProposed data must be the new_admin address");
+
+    // ---- accept_admin emits AdminTransferAccepted(accepted_by) ----
+    c.accept_admin(&new_admin);
+    let all = env.events().all();
+    let accepted = all.iter().find(|(_, topics, _)| {
+        !topics.is_empty() && topics.get(0).unwrap() == Symbol::new(&env, "AdminTransferAccepted")
+    }).expect("AdminTransferAccepted event must be emitted");
+
+    let (_emitter, _topics, data) = accepted;
+    let data_val: Address = data.into_val(&env);
+    assert_eq!(data_val, new_admin, "AdminTransferAccepted data must be the accepted_by address");
+
+    // Admin transfer completed.
+    assert_eq!(c.get_admin(), Some(new_admin));
 }

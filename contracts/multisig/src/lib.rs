@@ -501,3 +501,79 @@ impl MultiSigContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::Address as _,
+        Address, Bytes, Env, Symbol,
+    };
+
+    struct TestEnv {
+        env: Env,
+        contract_id: Address,
+    }
+
+    fn setup() -> TestEnv {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let contract_id = env.register(MultiSigContract, ());
+        TestEnv {
+            env,
+            contract_id,
+        }
+    }
+
+    fn client(t: &TestEnv) -> MultiSigContractClient<'_> {
+        MultiSigContractClient::new(&t.env, &t.contract_id)
+    }
+
+    #[test]
+    fn test_propose_rejects_removed_owner() {
+        let t = setup();
+        let c = client(&t);
+
+        let owner_a = Address::generate(&t.env);
+        let owner_b = Address::generate(&t.env);
+        let owner_c = Address::generate(&t.env);
+
+        c.initialize(
+            &vec![owner_a.clone(), owner_b.clone(), owner_c.clone()],
+            &1u32,
+        );
+
+        assert!(c.is_owner(&owner_a));
+        assert!(c.is_owner(&owner_b));
+        assert!(c.is_owner(&owner_c));
+        assert_eq!(c.owner_count(), 3);
+
+        // Remove owner_b through the multi-sig itself (current_contract_address auth).
+        c.remove_owner(&owner_b);
+        assert!(!c.is_owner(&owner_b));
+        assert_eq!(c.owner_count(), 2);
+
+        // Former owner_b attempts to propose with a stale authorization — must fail.
+        let target = Address::generate(&t.env);
+        let calldata = Bytes::new(&t.env);
+        let function = Symbol::new(&t.env, "noop");
+        let result = c.try_propose(&owner_b, &target, &function, &calldata, &u64::MAX);
+        assert_eq!(
+            result,
+            Err(Ok(MultiSigError::NotOwner)),
+            "a removed owner must not be able to propose a new intent"
+        );
+
+        // A remaining owner can still propose normally.
+        let intent_id = c.propose(&owner_a, &target, &function, &calldata, &u64::MAX);
+        assert!(intent_id.is_ok());
+
+        let intent = c.get_intent(intent_id.unwrap()).unwrap();
+        assert_eq!(intent.proposer, owner_a);
+        assert_eq!(intent.status, IntentStatus::Pending);
+    }
+}

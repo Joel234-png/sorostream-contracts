@@ -74,6 +74,19 @@ pub fn revoke_fee_manager(env: &Env) {
         .remove(&Symbol::new(env, FEE_MANAGER_KEY));
 }
 
+/// Atomically transfers the `FeeManager` role from `old` to `new`.
+pub fn transfer_fee_manager_role(
+    env: &Env,
+    old: &Address,
+    new: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if get_fee_manager(env).as_ref() != Some(old) {
+        return Err(crate::errors::StreamError::NotAuthorized);
+    }
+    set_fee_manager(env, new);
+    Ok(())
+}
+
 /// Returns the currently assigned `EmergencyPause` role address, or `None`.
 pub fn get_emergency_pause_role(env: &Env) -> Option<Address> {
     env.storage()
@@ -93,6 +106,19 @@ pub fn revoke_emergency_pause_role(env: &Env) {
     env.storage()
         .instance()
         .remove(&Symbol::new(env, EMERGENCY_PAUSE_KEY));
+}
+
+/// Atomically transfers the `EmergencyPause` role from `old` to `new`.
+pub fn transfer_emergency_pause_role(
+    env: &Env,
+    old: &Address,
+    new: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if get_emergency_pause_role(env).as_ref() != Some(old) {
+        return Err(crate::errors::StreamError::NotAuthorized);
+    }
+    set_emergency_pause_role(env, new);
+    Ok(())
 }
 
 /// Returns the currently assigned `Analytics` role address, or `None`.
@@ -116,6 +142,19 @@ pub fn revoke_analytics_role(env: &Env) {
         .remove(&Symbol::new(env, ANALYTICS_KEY));
 }
 
+/// Atomically transfers the `Analytics` role from `old` to `new`.
+pub fn transfer_analytics_role(
+    env: &Env,
+    old: &Address,
+    new: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if get_analytics_role(env).as_ref() != Some(old) {
+        return Err(crate::errors::StreamError::NotAuthorized);
+    }
+    set_analytics_role(env, new);
+    Ok(())
+}
+
 /// Returns the currently assigned `TokenAdmin` role address, or `None`.
 pub fn get_token_admin(env: &Env) -> Option<Address> {
     env.storage()
@@ -135,6 +174,19 @@ pub fn revoke_token_admin(env: &Env) {
     env.storage()
         .instance()
         .remove(&Symbol::new(env, TOKEN_ADMIN_KEY));
+}
+
+/// Atomically transfers the `TokenAdmin` role from `old` to `new`.
+pub fn transfer_token_admin_role(
+    env: &Env,
+    old: &Address,
+    new: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if get_token_admin(env).as_ref() != Some(old) {
+        return Err(crate::errors::StreamError::NotAuthorized);
+    }
+    set_token_admin(env, new);
+    Ok(())
 }
 
 // ── Role Aliases (Issue #623) ─────────────────────────────────────────────────

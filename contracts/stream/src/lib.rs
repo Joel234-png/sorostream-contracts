@@ -48,6 +48,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_620_tests;
 #[cfg(test)] mod issue_656_chaos_tests;
 #[cfg(test)] mod issue_661_tests;
+#[cfg(test)] mod differential_fuzz;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -647,6 +648,37 @@ impl SoroStreamContract {
         roles::get_fee_manager(&env)
     }
 
+    /// Transfers the `FeeManager` role from `old_holder` to `new_holder` in one
+    /// invocation.
+    pub fn transfer_fee_manager_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_fee_manager_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "FeeManager"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_fee_manager_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
+    }
+
     /// Assigns the `EmergencyPause` role to `assignee`.
     ///
     /// The emergency-pause operator may call `emergency_pause` and
@@ -697,6 +729,37 @@ impl SoroStreamContract {
     /// Returns the currently assigned `EmergencyPause` role address, or `None`.
     pub fn get_emergency_pause_role(env: Env) -> Option<Address> {
         roles::get_emergency_pause_role(&env)
+    }
+
+    /// Transfers the `EmergencyPause` role from `old_holder` to `new_holder` in
+    /// one invocation.
+    pub fn transfer_emergency_pause_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_emergency_pause_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "EmergencyPause"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_emergency_pause_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
     }
 
     /// Assigns the `Analytics` role to `assignee`.
@@ -751,6 +814,37 @@ impl SoroStreamContract {
         roles::get_analytics_role(&env)
     }
 
+    /// Transfers the `Analytics` role from `old_holder` to `new_holder` in one
+    /// invocation.
+    pub fn transfer_analytics_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_analytics_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "Analytics"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_analytics_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
+    }
+
     /// Assigns the `TokenAdmin` role to `assignee` (Issue #623).
     pub fn assign_token_admin(env: Env, admin: Address, assignee: Address) -> Result<(), StreamError> {
         admin.require_auth();
@@ -794,6 +888,37 @@ impl SoroStreamContract {
     /// Returns the currently assigned `TokenAdmin` address, or `None`.
     pub fn get_token_admin(env: Env) -> Option<Address> {
         roles::get_token_admin(&env)
+    }
+
+    /// Transfers the `TokenAdmin` role from `old_holder` to `new_holder` in one
+    /// invocation.
+    pub fn transfer_token_admin_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_token_admin_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "TokenAdmin"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_token_admin_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
     }
 
     pub fn set_fee_admin(env: Env, admin: Address, fee_admin: Address) -> Result<(), StreamError> {

@@ -48,6 +48,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_620_tests;
 #[cfg(test)] mod issue_656_chaos_tests;
 #[cfg(test)] mod issue_661_tests;
+#[cfg(test)] mod issue_763_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,

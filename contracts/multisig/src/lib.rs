@@ -110,6 +110,10 @@ fn remove_owner_storage(env: &Env, addr: &Address) {
                     .get(&owner_slot_key(env, last))
                     .unwrap();
                 env.storage().persistent().set(&owner_slot_key(env, i), &last_addr);
+                env.events().publish(
+                    (Symbol::new(env, "OwnerSlotChanged"), last_addr),
+                    (last, i),
+                );
             }
             env.storage().persistent().remove(&owner_slot_key(env, last));
             env.storage().instance().set(&Symbol::new(env, OWNER_COUNT_KEY), &last);
@@ -499,5 +503,35 @@ impl MultiSigContract {
             pending,
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, IntoVal};
+
+    #[test]
+    fn removing_owner_emits_slot_change_for_swapped_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigContract, ());
+        let owners = Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+        let removed_owner = owners.get(0).unwrap();
+        let moved_owner = owners.get(1).unwrap();
+        let client = MultiSigContractClient::new(&env, &contract_id);
+        client.initialize(&owners, &1);
+
+        client.remove_owner(&removed_owner);
+
+        let events = env.events().all();
+        let slot_event = events.iter().find(|(_, topics, _)| {
+            let event_name: Symbol = topics.get(0).unwrap().into_val(&env);
+            event_name == Symbol::new(&env, "OwnerSlotChanged")
+        }).unwrap();
+        let moved_address: Address = slot_event.1.get(1).unwrap().into_val(&env);
+        let (old_slot, new_slot): (u32, u32) = slot_event.2.into_val(&env);
+        assert_eq!(moved_address, moved_owner);
+        assert_eq!((old_slot, new_slot), (1, 0));
     }
 }

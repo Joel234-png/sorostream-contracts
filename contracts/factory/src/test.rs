@@ -131,6 +131,39 @@ fn test_deploy_unauthorized_non_admin() {
 }
 
 #[test]
+fn test_deploy_rejects_caller_matching_child_contract_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_sequence_number(42);
+    env.ledger().set_timestamp(1000);
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    c.initialize(&admin);
+
+    let wasm_hash = upload_child_wasm(&env);
+
+    // Deploy a child contract so we have a real child contract address.
+    let child_addr = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1));
+
+    // Attempt to deploy again, but authenticate as the child contract's own
+    // address. The child address is NOT the stored admin, so the call must be
+    // rejected even though the caller's address matches a previously-deployed
+    // child contract (the admin check is strictly identity-based).
+    let result = c.try_deploy_stream_contract(
+        &child_addr,
+        &wasm_hash,
+        &fake_salt(&env, 2),
+    );
+    assert!(result.is_err());
+    match result {
+        Err(Ok(e)) => assert_eq!(e, FactoryError::Unauthorized),
+        _ => panic!("expected Unauthorized"),
+    }
+}
+
+#[test]
 fn test_get_deployment_info_unknown_address_returns_none() {
     let env = Env::default();
     env.mock_all_auths();

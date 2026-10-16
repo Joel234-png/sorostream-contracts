@@ -137,6 +137,40 @@ pub fn revoke_token_admin(env: &Env) {
         .remove(&Symbol::new(env, TOKEN_ADMIN_KEY));
 }
 
+// ── Aggregated role view (Issue #753) ─────────────────────────────────────────
+
+/// All currently-assigned admin roles in a single view, so an admin dashboard
+/// can assemble the full picture of who holds what with one call instead of
+/// querying each role getter (plus the super-admin getter) separately.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleHolders {
+    /// Super-admin (stored under the contract's `admin` key).
+    pub super_admin: Option<Address>,
+    /// Fee manager role holder.
+    pub fee_manager: Option<Address>,
+    /// Emergency pause role holder.
+    pub emergency_pause: Option<Address>,
+    /// Analytics role holder.
+    pub analytics: Option<Address>,
+    /// Token admin role holder.
+    pub token_admin: Option<Address>,
+}
+
+/// Returns all currently-assigned admin roles in a single call.
+pub fn get_role_holders(env: &Env) -> RoleHolders {
+    RoleHolders {
+        super_admin: env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "admin")),
+        fee_manager: get_fee_manager(env),
+        emergency_pause: get_emergency_pause_role(env),
+        analytics: get_analytics_role(env),
+        token_admin: get_token_admin(env),
+    }
+}
+
 // ── Role Aliases (Issue #623) ─────────────────────────────────────────────────
 
 pub fn get_fee_admin(env: &Env) -> Option<Address> {

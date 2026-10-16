@@ -256,7 +256,7 @@ impl MultiSigContract {
 
         env.events().publish(
             (Symbol::new(&env, "IntentProposed"), id),
-            (proposer, target, function, nonce, expiry),
+            (proposer, target, function, nonce, expiry, calldata),
         );
 
         Ok(id)
@@ -267,6 +267,17 @@ impl MultiSigContract {
     /// When the approval count reaches the threshold the operation executes
     /// automatically and `true` is returned. Returns `false` if the threshold
     /// has not yet been reached.
+    ///
+    /// Execution invokes `intent.function` on `intent.target` with
+    /// `intent.calldata` as a single raw `Bytes` argument, assuming the target
+    /// returns `()`. This is the generic "invoke a target with one raw `Bytes`
+    /// argument" execution convention shared with governance's `execute`.
+    ///
+    /// It is NOT the convention used by the main stream contract, whose entry
+    /// points take distinct typed parameters and return `Result<_, StreamError>`.
+    /// Consequently, a multi-sig intent cannot directly invoke the stream
+    /// contract's real entry points through this path; an adapter accepting a
+    /// single `Bytes` argument would be required.
     pub fn approve(
         env: Env,
         owner: Address,
@@ -499,5 +510,70 @@ impl MultiSigContract {
             pending,
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    extern crate std;
+
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::{Address, Bytes, Env, Symbol};
+
+    use super::{MultiSigContract, MultiSigContractClient};
+
+    #[test]
+    fn test_intent_proposed_event_includes_calldata() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract = env.register(MultiSigContract, ());
+        let client = MultiSigContractClient::new(&env, &contract);
+
+        let owner = Address::generate(&env);
+        let owners = soroban_sdk::Vec::from_array(&env, [owner.clone()]);
+        client
+            .initialize(&owners, &1u32)
+            .expect("initialize should succeed");
+
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "transfer");
+        let calldata = Bytes::from_array(&env, &[0xde, 0xad, 0xbe, 0xef]);
+        let expiry = env.ledger().timestamp() + 1000;
+
+        let id = client
+            .propose(&owner, &target, &function, &calldata, &expiry)
+            .expect("propose should succeed");
+
+        let all = env.events().all();
+        let mut found_data: Option<soroban_sdk::Val> = None;
+        let mut found_id: Option<u64> = None;
+        for (_, topics, data) in all.iter() {
+            if topics.is_empty() {
+                continue;
+            }
+            let name: Symbol = topics.get(0).unwrap().into_val(&env);
+            if name == Symbol::new(&env, "IntentProposed") {
+                found_data = Some(data.clone());
+                found_id = Some(topics.get(1).unwrap().into_val(&env));
+            }
+        }
+
+        let data = found_data.expect("IntentProposed event must be emitted");
+        let event_id = found_id.expect("IntentProposed topic id must be present");
+        assert_eq!(event_id, id, "IntentProposed topic id must match returned intent id");
+
+        let (_proposer, _target, _function, _nonce, _expiry, ev_calldata): (
+            Address,
+            Address,
+            Symbol,
+            u64,
+            u64,
+            Bytes,
+        ) = data.into_val(&env);
+        assert_eq!(
+            ev_calldata, calldata,
+            "IntentProposed event data must include calldata"
+        );
     }
 }

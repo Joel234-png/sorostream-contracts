@@ -328,7 +328,15 @@ impl GovernanceContract {
     /// Executes a queued proposal after the timelock has elapsed.
     ///
     /// Callable by anyone. Invokes `proposal.function` on `proposal.target` with
-    /// `proposal.calldata` as arguments.
+    /// `proposal.calldata` as a single raw `Bytes` argument, assuming the target
+    /// returns `()`. This is the generic "invoke a target with one raw `Bytes`
+    /// argument" execution convention shared with the multi-sig's `approve`.
+    ///
+    /// It is NOT the convention used by the main stream contract, whose entry
+    /// points take distinct typed parameters and return `Result<_, StreamError>`.
+    /// Consequently, a governance proposal (or multi-sig intent) cannot directly
+    /// invoke the stream contract's real entry points through this path; an
+    /// adapter accepting a single `Bytes` argument would be required.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let mut proposal = load_proposal(&env, proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;

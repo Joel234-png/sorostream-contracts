@@ -56,6 +56,7 @@ pub struct DeploymentInfo {
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
 const CONTRACTS_KEY: &str = "contracts";
+const CONTRACTS_COUNT_KEY: &str = "contracts_count";
 const INFO_PREFIX: &str = "info";
 
 fn admin_key(env: &Env) -> Symbol {
@@ -64,6 +65,10 @@ fn admin_key(env: &Env) -> Symbol {
 
 fn contracts_key(env: &Env) -> Symbol {
     Symbol::new(env, CONTRACTS_KEY)
+}
+
+fn contracts_count_key(env: &Env) -> Symbol {
+    Symbol::new(env, CONTRACTS_COUNT_KEY)
 }
 
 fn info_key(env: &Env, addr: &Address) -> (Symbol, Address) {
@@ -122,6 +127,9 @@ impl StreamFactory {
         }
         admin.require_auth();
         env.storage().instance().set(&admin_key(&env), &admin);
+        env.storage()
+            .persistent()
+            .set(&contracts_count_key(&env), &0u32);
         Ok(())
     }
 
@@ -187,6 +195,9 @@ impl StreamFactory {
         env.storage()
             .persistent()
             .set(&contracts_key(&env), &list);
+        env.storage()
+            .persistent()
+            .set(&contracts_count_key(&env), &list.len());
 
         Ok(child_address)
     }
@@ -201,6 +212,26 @@ impl StreamFactory {
             .persistent()
             .get(&contracts_key(&env))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the number of deployed child contracts without loading the registry.
+    ///
+    /// For factories created before this count was persisted, falls back to the
+    /// registry length until the next deployment records the count.
+    pub fn get_deployed_contract_count(env: Env) -> u32 {
+        if let Some(count) = env
+            .storage()
+            .persistent()
+            .get(&contracts_count_key(&env))
+        {
+            return count;
+        }
+
+        env.storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&contracts_key(&env))
+            .unwrap_or(Vec::new(&env))
+            .len()
     }
 
     /// Returns deployment metadata for a single child contract address.

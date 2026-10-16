@@ -70,6 +70,7 @@ fn test_get_deployed_contracts_empty_before_any_deployment() {
     c.initialize(&admin);
 
     assert_eq!(c.get_deployed_contracts().len(), 0);
+    assert_eq!(c.get_deployed_contract_count(), 0);
 }
 
 #[test]
@@ -166,6 +167,7 @@ fn test_deploy_records_metadata_and_registry() {
     // Registry has one entry.
     let contracts = c.get_deployed_contracts();
     assert_eq!(contracts.len(), 1);
+    assert_eq!(c.get_deployed_contract_count(), 1);
     assert_eq!(contracts.get(0).unwrap(), child_addr);
 
     // Metadata is correct.
@@ -217,4 +219,5 @@ fn test_deploy_multiple_contracts_all_listed_in_order() {
     assert_eq!(contracts.get(0).unwrap(), addr1);
     assert_eq!(contracts.get(1).unwrap(), addr2);
     assert_eq!(contracts.get(2).unwrap(), addr3);
+    assert_eq!(c.get_deployed_contract_count(), 3);
 }

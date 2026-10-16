@@ -2489,7 +2489,7 @@ impl SoroStreamContract {
     ///
     /// The `decay_factor` is expressed in **basis points per 1 000 seconds**
     /// (e.g. `100` = 1 % per 1 ks window).  A value of `0` is identical to
-    /// `VestingCurve::Linear`.  Values ≥ 10 000 are clamped to 9 999 internally.
+    /// `VestingCurve::Linear`. Values ≥ 10 000 are rejected.
     ///
     /// All other fields behave identically to `create_stream`.
     #[allow(dead_code)]
@@ -2530,6 +2530,9 @@ impl SoroStreamContract {
         }
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
+        }
+        if matches!(&curve, VestingCurve::TimeDecay(decay_factor) if *decay_factor >= 10_000) {
+            return Err(StreamError::InvalidParameter);
         }
         validate_recipient_address(&env, &sender, &recipient)?;
         if cliff_seconds > duration_seconds {

@@ -60,6 +60,27 @@ fn test_decay_factor_zero_equals_linear() {
 }
 
 #[test]
+fn test_decay_rejects_out_of_range_factor() {
+    for factor in [10_000, 10_001, u32::MAX] {
+        assert_eq!(
+            compute_cumulative_decay(1_000_000, 0, 10_000, 1_000, factor),
+            None,
+            "invalid decay factor {factor} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn test_long_decay_stream_completes_with_bounded_exponentiation() {
+    let deposit = 1_000_000_000i128;
+    let end = 30 * 365 * 24 * 60 * 60;
+    let halfway = compute_cumulative_decay(deposit, 0, end, end / 2, 1).unwrap();
+
+    assert!(halfway > 0 && halfway < deposit);
+    assert_eq!(compute_cumulative_decay(deposit, 0, end, end, 1), Some(deposit));
+}
+
+#[test]
 fn test_decay_claimable_always_gte_linear() {
     // For any decay_factor > 0 the front-weighting means that by any given
     // moment the cumulative decay-vested amount is ≥ the linearly-vested amount.
@@ -387,6 +408,23 @@ fn test_contract_linear_curve_stored_and_claimable() {
     let claimable = c.get_claimable(&stream_id);
     // Linear: flow_rate × elapsed = (100_000/10_000) × 5_000 = 50_000
     assert_eq!(claimable, 50_000, "linear curve: half the deposit after half duration");
+}
+
+#[test]
+fn test_contract_rejects_out_of_range_decay_factor() {
+    let t = setup_decay();
+    let c = decay_client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let result = c.try_create_stream_with_curve(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &10_000, &0,
+        &0, &false, &None, &0, &false,
+        &VestingCurve::TimeDecay(10_000),
+        &None, &None, &false,
+    );
+
+    assert!(matches!(result, Err(Ok(StreamError::InvalidParameter))));
 }
 
 #[test]

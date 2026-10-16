@@ -9,9 +9,11 @@
 //! 3. After the voting period ends, if quorum is met, anyone calls `queue` to start the timelock.
 //! 4. After the 48-hour timelock the proposal is executable via `execute`.
 //! 5. The guardian may `veto` a queued proposal before it executes.
+//! A proposer may withdraw their proposal while it is still active.
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Val,
+    Vec,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -28,6 +30,7 @@ const PROPOSAL_COUNT_KEY: &str = "p_cnt";
 
 const DEFAULT_VOTING_PERIOD: u64 = 7 * 24 * 60 * 60; // 7 days
 const DEFAULT_TIMELOCK_PERIOD: u64 = 48 * 60 * 60;   // 48 hours
+const MAX_GOVERNANCE_PERIOD: u64 = 365 * 24 * 60 * 60; // 1 year
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +47,8 @@ pub enum ProposalStatus {
     Executed,
     /// Vetoed by the guardian during the timelock.
     Vetoed,
+    /// Withdrawn by the proposer while voting is open.
+    Cancelled,
 }
 
 #[contracttype]
@@ -55,7 +60,13 @@ pub struct Proposal {
     pub target: Address,
     /// Function name to call on the target.
     pub function: Symbol,
-    /// ABI-encoded arguments passed verbatim to the target.
+    /// Snapshot of the quorum required for this proposal.
+    pub quorum: u64,
+    /// Snapshot of the timelock period applied when this proposal is queued.
+    pub timelock_period: u64,
+    /// Guardian authorized to veto this proposal.
+    pub guardian: Address,
+    /// XDR-encoded `Vec<Val>` arguments passed to the target; empty bytes means no arguments.
     pub calldata: Bytes,
     pub status: ProposalStatus,
     /// Ledger timestamp when voting opened.
@@ -86,6 +97,9 @@ pub enum GovernanceError {
     ProposalNotQueued = 10,
     InsufficientTokens = 11,
     InvalidParam = 12,
+    NotProposer = 13,
+    ProposalNotActive = 14,
+    InvalidCalldata = 15,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -144,6 +158,14 @@ fn get_u64(env: &Env, key: &str, default: u64) -> u64 {
     env.storage().instance().get(&Symbol::new(env, key)).unwrap_or(default)
 }
 
+fn decode_calldata(env: &Env, calldata: &Bytes) -> Result<Vec<Val>, GovernanceError> {
+    if calldata.len() == 0 {
+        return Ok(Vec::new(env));
+    }
+    env.from_xdr::<Vec<Val>>(calldata)
+        .map_err(|_| GovernanceError::InvalidCalldata)
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -157,8 +179,8 @@ impl GovernanceContract {
     /// * `token` — governance token used to check balances and vote weight.
     /// * `proposal_threshold` — minimum token balance required to create a proposal.
     /// * `quorum` — minimum total votes (for + against) required for a proposal to pass.
-    /// * `voting_period` — seconds the voting window stays open (0 = default 7 days).
-    /// * `timelock_period` — seconds between queue and execution (0 = default 48 h).
+    /// * `voting_period` — seconds the voting window stays open (0 = default 7 days, max 1 year).
+    /// * `timelock_period` — seconds between queue and execution (0 = default 48 h, max 1 year).
     #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
@@ -172,6 +194,9 @@ impl GovernanceContract {
     ) -> Result<(), GovernanceError> {
         if read_admin(&env).is_some() {
             return Err(GovernanceError::AlreadyInitialized);
+        }
+        if voting_period > MAX_GOVERNANCE_PERIOD || timelock_period > MAX_GOVERNANCE_PERIOD {
+            return Err(GovernanceError::InvalidParam);
         }
         env.storage().instance().set(&Symbol::new(&env, ADMIN_KEY), &admin);
         env.storage().instance().set(&Symbol::new(&env, GUARDIAN_KEY), &guardian);
@@ -192,6 +217,8 @@ impl GovernanceContract {
     /// Creates a new governance proposal.
     ///
     /// The proposer must hold at least `proposal_threshold` tokens.
+    /// `calldata` must contain the XDR encoding of the target's `Vec<Val>` arguments,
+    /// or be empty for a target function with no arguments.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -200,6 +227,7 @@ impl GovernanceContract {
         calldata: Bytes,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
+        decode_calldata(&env, &calldata)?;
 
         let token: Address = env.storage().instance()
             .get(&Symbol::new(&env, TOKEN_KEY))
@@ -213,6 +241,11 @@ impl GovernanceContract {
 
         let now = env.ledger().timestamp();
         let voting_period = get_u64(&env, VOTING_PERIOD_KEY, DEFAULT_VOTING_PERIOD);
+        let quorum = get_u64(&env, QUORUM_KEY, 0);
+        let timelock_period = get_u64(&env, TIMELOCK_PERIOD_KEY, DEFAULT_TIMELOCK_PERIOD);
+        let guardian: Address = env.storage().instance()
+            .get(&Symbol::new(&env, GUARDIAN_KEY))
+            .ok_or(GovernanceError::NotInitialized)?;
 
         let id = next_proposal_id(&env);
         let proposal = Proposal {
@@ -220,6 +253,9 @@ impl GovernanceContract {
             proposer: proposer.clone(),
             target: target.clone(),
             function: function.clone(),
+            quorum,
+            timelock_period,
+            guardian,
             calldata: calldata.clone(),
             status: ProposalStatus::Active,
             vote_start: now,
@@ -300,9 +336,8 @@ impl GovernanceContract {
             return Err(GovernanceError::VotingNotActive);
         }
 
-        let quorum = get_u64(&env, QUORUM_KEY, 0);
         let total_votes = proposal.votes_for.saturating_add(proposal.votes_against);
-        if total_votes < quorum || proposal.votes_for <= proposal.votes_against {
+        if total_votes < proposal.quorum || proposal.votes_for <= proposal.votes_against {
             proposal.status = ProposalStatus::Defeated;
             save_proposal(&env, &proposal);
             env.events().publish(
@@ -312,8 +347,7 @@ impl GovernanceContract {
             return Err(GovernanceError::QuorumNotReached);
         }
 
-        let timelock = get_u64(&env, TIMELOCK_PERIOD_KEY, DEFAULT_TIMELOCK_PERIOD);
-        proposal.eta = now.saturating_add(timelock);
+        proposal.eta = now.saturating_add(proposal.timelock_period);
         proposal.status = ProposalStatus::Queued;
         save_proposal(&env, &proposal);
 
@@ -342,13 +376,14 @@ impl GovernanceContract {
             return Err(GovernanceError::TimelockNotExpired);
         }
 
+        let args = decode_calldata(&env, &proposal.calldata)?;
         proposal.status = ProposalStatus::Executed;
         save_proposal(&env, &proposal);
 
-        env.invoke_contract::<()>(
+        let _ = env.invoke_contract::<Val>(
             &proposal.target,
             &proposal.function,
-            Vec::from_array(&env, [soroban_sdk::IntoVal::into_val(&proposal.calldata, &env)]),
+            args,
         );
 
         env.events().publish(
@@ -363,16 +398,11 @@ impl GovernanceContract {
     pub fn veto(env: Env, guardian: Address, proposal_id: u64) -> Result<(), GovernanceError> {
         guardian.require_auth();
 
-        let stored: Address = env.storage().instance()
-            .get(&Symbol::new(&env, GUARDIAN_KEY))
-            .ok_or(GovernanceError::NotInitialized)?;
-        if guardian != stored {
-            return Err(GovernanceError::NotGuardian);
-        }
-
         let mut proposal = load_proposal(&env, proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;
-
+        if guardian != proposal.guardian {
+            return Err(GovernanceError::NotGuardian);
+        }
         if proposal.status != ProposalStatus::Queued {
             return Err(GovernanceError::ProposalNotQueued);
         }
@@ -383,6 +413,33 @@ impl GovernanceContract {
         env.events().publish(
             (Symbol::new(&env, "ProposalVetoed"), proposal_id),
             guardian,
+        );
+
+        Ok(())
+    }
+
+    /// Withdraws an active proposal. Only its proposer may cancel it.
+    pub fn cancel_proposal(
+        env: Env,
+        proposer: Address,
+        proposal_id: u64,
+    ) -> Result<(), GovernanceError> {
+        proposer.require_auth();
+
+        let mut proposal = load_proposal(&env, proposal_id)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        if proposal.proposer != proposer {
+            return Err(GovernanceError::NotProposer);
+        }
+        if proposal.status != ProposalStatus::Active {
+            return Err(GovernanceError::ProposalNotActive);
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        save_proposal(&env, &proposal);
+        env.events().publish(
+            (Symbol::new(&env, "ProposalCancelled"), proposal_id),
+            proposer,
         );
 
         Ok(())
@@ -425,7 +482,7 @@ impl GovernanceContract {
     /// Updates the voting period in seconds. Only admin may call this.
     pub fn set_voting_period(env: Env, seconds: u64) -> Result<(), GovernanceError> {
         check_admin(&env);
-        if seconds == 0 {
+        if seconds == 0 || seconds > MAX_GOVERNANCE_PERIOD {
             return Err(GovernanceError::InvalidParam);
         }
         env.storage().instance().set(&Symbol::new(&env, VOTING_PERIOD_KEY), &seconds);
@@ -435,7 +492,7 @@ impl GovernanceContract {
     /// Updates the timelock period in seconds. Only admin may call this.
     pub fn set_timelock_period(env: Env, seconds: u64) -> Result<(), GovernanceError> {
         check_admin(&env);
-        if seconds == 0 {
+        if seconds == 0 || seconds > MAX_GOVERNANCE_PERIOD {
             return Err(GovernanceError::InvalidParam);
         }
         env.storage().instance().set(&Symbol::new(&env, TIMELOCK_PERIOD_KEY), &seconds);

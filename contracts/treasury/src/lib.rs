@@ -193,8 +193,17 @@ impl TreasuryContract {
     }
 
     /// Sets the LP reward pool address. Only admin may call this.
+    ///
+    /// Rejects the zero/burn address and the treasury contract's own address
+    /// (a self-referential split would route LP rewards back into the treasury).
     pub fn set_lp_pool(env: Env, lp_pool: Address) {
         check_admin(&env);
+        if is_zero_address(&env, &lp_pool) {
+            panic!("InvalidLpPoolAddress");
+        }
+        if lp_pool == env.current_contract_address() {
+            panic!("LpPoolIsTreasuryContract");
+        }
         env.storage()
             .instance()
             .set(&Symbol::new(&env, LP_POOL_KEY), &lp_pool);
@@ -218,6 +227,10 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, TREASURY_SPLIT_BPS_KEY), &treasury_bps);
+        env.events().publish(
+            (Symbol::new(&env, "TreasurySplitSet"),),
+            treasury_bps,
+        );
     }
 
     /// Returns the configured treasury split in basis points.

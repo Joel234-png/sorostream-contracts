@@ -241,7 +241,10 @@ impl TreasuryContract {
         }
 
         let treasury_bps = read_treasury_split_bps(&env);
-        let treasury_amount = total * treasury_bps as i128 / 10_000;
+        let treasury_amount = total
+            .checked_mul(treasury_bps as i128)
+            .and_then(|amount| amount.checked_div(10_000))
+            .expect("treasury distribution overflow");
         let lp_amount = total - treasury_amount;
 
         // Clear the balance before transfers (checks-effects-interactions)
@@ -385,6 +388,16 @@ mod test {
 
         c.deposit(&t.token_id, &500);
         assert_eq!(c.get_balance(&t.token_id), 1500);
+    }
+
+    #[test]
+    fn test_distribute_rejects_overflowing_treasury_calculation() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+        c.deposit(&t.token_id, &i128::MAX);
+
+        assert!(c.try_distribute(&t.token_id, &t.user).is_err());
     }
 
     #[test]

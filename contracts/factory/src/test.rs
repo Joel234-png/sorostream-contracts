@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, BytesN, Env,
+    Address, BytesN, Env, IntoVal, Symbol, Val,
 };
 
 // ---------------------------------------------------------------------------
@@ -22,6 +22,19 @@ fn upload_child_wasm(env: &Env) -> BytesN<32> {
         sha256 = "fd41d2f77920ca07b723e05f732a82db4c2f6459eb2be6b40c4f225434569550"
     );
     env.deployer().upload_contract_wasm(CHILD_WASM)
+}
+
+fn has_event(env: &Env, name: &str) -> bool {
+    env.events().all().iter().any(|(_, topics, _)| {
+        let topics: Vec<Val> = topics.clone();
+        topics
+            .get(0)
+            .map(|topic| {
+                let topic: Symbol = topic.into_val(env);
+                topic == Symbol::new(env, name)
+            })
+            .unwrap_or(false)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +82,7 @@ fn test_get_deployed_contracts_empty_before_any_deployment() {
     let admin = Address::generate(&env);
     c.initialize(&admin);
 
-    assert_eq!(c.get_deployed_contracts().len(), 0);
+    assert_eq!(c.get_deployed_contracts(&0, &20).len(), 0);
 }
 
 #[test]
@@ -164,9 +177,10 @@ fn test_deploy_records_metadata_and_registry() {
     let child_addr = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1));
 
     // Registry has one entry.
-    let contracts = c.get_deployed_contracts();
+    let contracts = c.get_deployed_contracts(&0, &20);
     assert_eq!(contracts.len(), 1);
     assert_eq!(contracts.get(0).unwrap(), child_addr);
+    assert!(has_event(&env, "StreamContractDeployed"));
 
     // Metadata is correct.
     let info = c.get_deployment_info(&child_addr).unwrap();
@@ -212,9 +226,30 @@ fn test_deploy_multiple_contracts_all_listed_in_order() {
     let addr2 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 20));
     let addr3 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 30));
 
-    let contracts = c.get_deployed_contracts();
-    assert_eq!(contracts.len(), 3);
-    assert_eq!(contracts.get(0).unwrap(), addr1);
-    assert_eq!(contracts.get(1).unwrap(), addr2);
-    assert_eq!(contracts.get(2).unwrap(), addr3);
+    let first_page = c.get_deployed_contracts(&0, &2);
+    let second_page = c.get_deployed_contracts(&2, &2);
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page.get(0).unwrap(), addr1);
+    assert_eq!(first_page.get(1).unwrap(), addr2);
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page.get(0).unwrap(), addr3);
+    assert_eq!(c.get_deployed_contracts(&3, &2).len(), 0);
+}
+
+#[test]
+fn test_admin_transfer_events_are_published() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let client = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.propose_admin(&new_admin);
+    assert!(has_event(&env, "AdminTransferProposed"));
+
+    client.accept_admin(&new_admin);
+    assert!(has_event(&env, "AdminTransferAccepted"));
 }

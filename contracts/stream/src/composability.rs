@@ -10,28 +10,41 @@
 //! An external contract imports and instantiates [`SoroStreamComposabilityClient`]:
 //!
 //! ```rust,ignore
-//! use sorostream_stream::composability::SoroStreamComposabilityClient;
+//! use sorostream_stream::{
+//!     composability::SoroStreamComposabilityClient,
+//!     CreateStreamParams, StreamError,
+//! };
 //!
-//! let client = SoroStreamComposabilityClient::new(&env, &sorostream_contract_id);
+//! fn create_dao_grant(
+//!     env: &soroban_sdk::Env,
+//!     sorostream_contract_id: &soroban_sdk::Address,
+//!     recipient: &soroban_sdk::Address,
+//!     usdc_token: &soroban_sdk::Address,
+//! ) -> Result<u64, StreamError> {
+//!     let client = SoroStreamComposabilityClient::new(env, sorostream_contract_id);
 //!
-//! // Create a stream on behalf of a DAO grant
-//! let stream_id = client.create_stream(
-//!     &env.current_contract_address(), // sender = the calling contract
-//!     &recipient,
-//!     &usdc_token,
-//!     &1_000_000_000i128,              // 1 000 USDC (7 decimals)
-//!     &(30 * 24 * 60 * 60u64),         // 30 days
-//!     &0u64,                           // no cliff
-//!     &0u64,                           // nonce = 0
-//!     &false,                          // no auto-renew
-//!     &None::<u32>,                    // unlimited renewals
-//!     &0u64,                           // no lock
-//!     &false,                          // recipient cannot terminate
-//!     &false,                          // transferable
-//! )?;
+//!     // Create a stream on behalf of a DAO grant. Propagate StreamError to the caller.
+//!     let stream_id = client.composable_create_stream(
+//!         &env.current_contract_address(), // sender = the calling contract
+//!         recipient,
+//!         usdc_token,
+//!         &1_000_000_000i128,              // 1 000 USDC (7 decimals)
+//!         &(30 * 24 * 60 * 60u64),         // 30 days
+//!         &false,                          // no auto-renew
+//!         &CreateStreamParams {
+//!             cliff_seconds: 0,
+//!             nonce: 0,
+//!             lock_until: 0,
+//!             allow_recipient_termination: false,
+//!             non_transferable: false,
+//!             ..Default::default()
+//!         },
+//!     )?;
 //!
-//! // Query current claimable balance
-//! let claimable = client.get_claimable(&stream_id)?;
+//!     // Query current claimable balance, propagating any query error too.
+//!     let _claimable = client.composable_get_claimable(&stream_id)?;
+//!     Ok(stream_id)
+//! }
 //! ```
 //!
 //! ## Design Decisions

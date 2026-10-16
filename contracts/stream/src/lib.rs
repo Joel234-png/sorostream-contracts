@@ -95,7 +95,7 @@ use storage::{
     is_blocked, is_fee_exempt, is_paused_or_auto_unpause, is_recipient_allowed,
     is_rate_limit_exempt, is_reentrancy_locked, is_sender_promoted,
     is_token_whitelisted, is_whitelisted,
-    is_whitelist_enabled, load_stream, load_tranches,
+    is_whitelist_enabled, load_stream, load_stream_view, load_tranches,
     add_token_to_whitelist, set_token_whitelist_enabled,
     mark_nonce_used, MAX_PAUSE_DURATION, nonce_used,
     read_admin, read_applied_migrations, read_audit_log, read_fee_discount,
@@ -108,6 +108,7 @@ use storage::{
     remove_holdback,
     mark_stream_cancelled, is_stream_cancelled,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
+    stream_entry_value_size,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
     set_delegate, set_expiry_warning_window,
     set_expiry_warning_emitted, set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
@@ -6553,8 +6554,35 @@ impl SoroStreamContract {
     /// persisted value is still `Active` or `Completed`. This makes it unnecessary
     /// for clients to compare timestamps themselves.
     pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
-        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        let stream = load_stream_view(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         Ok(refreshed_stream_view(&env, stream))
+    }
+
+    /// Estimates the XLM rent for the stream value over `ledgers` ledgers.
+    ///
+    /// `rent_rate_stroops_per_kib_per_ledger` must be the current network rate.
+    /// The result is in stroops and covers the stream value only; it excludes
+    /// the storage key and auxiliary index entries, so treat it as a baseline.
+    pub fn estimate_stream_rent_cost(
+        env: Env,
+        stream_id: u64,
+        rent_rate_stroops_per_kib_per_ledger: i128,
+        ledgers: u32,
+    ) -> Result<i128, StreamError> {
+        if rent_rate_stroops_per_kib_per_ledger < 0 {
+            return Err(StreamError::InvalidAmount);
+        }
+        let value_bytes = stream_entry_value_size(&env, stream_id)
+            .ok_or(StreamError::StreamNotFound)? as i128;
+        let byte_ledger_cost = value_bytes
+            .checked_mul(ledgers as i128)
+            .and_then(|cost| cost.checked_mul(rent_rate_stroops_per_kib_per_ledger))
+            .ok_or(StreamError::Overflow)?;
+        let cost_stroops = byte_ledger_cost
+            .checked_add(1023)
+            .ok_or(StreamError::Overflow)?
+            / 1024;
+        Ok(cost_stroops)
     }
 
     /// Returns the last 10 persisted lifecycle transitions for a stream.

@@ -261,6 +261,12 @@ pub trait SoroStreamInterface {
     fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
 
     fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError>;
+    fn estimate_stream_rent_cost(
+        env: Env,
+        stream_id: u64,
+        rent_rate_stroops_per_kib_per_ledger: i128,
+        ledgers: u32,
+    ) -> Result<i128, StreamError>;
     /// Returns up to the last 10 persisted lifecycle transitions, oldest first.
     fn get_stream_transitions(env: Env, stream_id: u64) -> Result<Vec<StreamTransition>, StreamError>;
     fn get_all_stream_ids(env: Env, start: u32, limit: u32) -> Vec<u64>;

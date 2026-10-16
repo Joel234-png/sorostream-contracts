@@ -15,6 +15,9 @@
 //! must route them through `propose` + `approve` so the multi-sig approves its own
 //! configuration changes.
 
+#[cfg(test)]
+mod test;
+
 use soroban_sdk::{
     contract, contractimpl, contracterror, contracttype, Address, Bytes, Env, Symbol, Vec,
 };
@@ -27,6 +30,8 @@ const INTENT_COUNT_KEY: &str = "i_cnt";
 const NONCE_KEY: &str = "nonce";
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
+const PROPOSER_INTENTS_KEY: &str = "pi";
+const TARGET_INTENTS_KEY: &str = "ti";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -120,6 +125,22 @@ fn remove_owner_storage(env: &Env, addr: &Address) {
 
 fn owner_count(env: &Env) -> u32 {
     env.storage().instance().get(&Symbol::new(env, OWNER_COUNT_KEY)).unwrap_or(0)
+}
+
+/// Returns every intent id proposed by `proposer` (any status).
+fn proposer_intents_key(env: &Env, proposer: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "pi"), proposer.clone())
+}
+
+/// Returns every intent id targeting `target` (any status).
+fn target_intents_key(env: &Env, target: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "ti"), target.clone())
+}
+
+fn append_intent_index(env: &Env, key: (Symbol, Address), id: u64) {
+    let mut list: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
+    list.push_back(id);
+    env.storage().persistent().set(&key, &list);
 }
 
 fn get_threshold(env: &Env) -> u32 {
@@ -305,9 +326,17 @@ impl MultiSigContract {
 
         if intent.approval_count >= threshold {
             intent.status = IntentStatus::Executed;
-            save_intent(&env, &intent);
+        save_intent(&env, &intent);
 
-            env.events().publish(
+        // Secondary indexes so intents can be listed by proposer or target.
+        append_intent_index(
+            &env,
+            proposer_intents_key(&env, &proposer),
+            id,
+        );
+        append_intent_index(&env, target_intents_key(&env, &target), id);
+
+        env.events().publish(
                 (Symbol::new(&env, "ThresholdReached"), intent_id),
                 threshold,
             );
@@ -422,6 +451,18 @@ impl MultiSigContract {
         owner_count(&env)
     }
 
+    /// Returns the full list of current owner addresses.
+    pub fn get_owners(env: Env) -> Vec<Address> {
+        let cnt = owner_count(&env);
+        let mut owners = Vec::new(&env);
+        for i in 0..cnt {
+            if let Some(addr) = env.storage().persistent().get(&owner_slot_key(&env, i)) {
+                owners.push_back(addr);
+            }
+        }
+        owners
+    }
+
     /// Returns the current global nonce (next value that will be used).
     pub fn get_nonce(env: Env) -> u64 {
         env.storage()
@@ -433,6 +474,28 @@ impl MultiSigContract {
     /// Returns the full intent struct.
     pub fn get_intent(env: Env, intent_id: u64) -> Result<Intent, MultiSigError> {
         load_intent(&env, intent_id).ok_or(MultiSigError::IntentNotFound)
+    }
+
+    /// Returns the ids of all intents proposed by `proposer` (any status).
+    ///
+    /// Use [`get_intent`] to inspect each intent's status and filter for
+    /// `IntentStatus::Pending` if only live intents are needed.
+    pub fn get_intents_by_proposer(env: Env, proposer: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&proposer_intents_key(&env, &proposer))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the ids of all intents targeting `target` (any status).
+    ///
+    /// Use [`get_intent`] to inspect each intent's status and filter for
+    /// `IntentStatus::Pending` if only live intents are needed.
+    pub fn get_intents_by_target(env: Env, target: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&target_intents_key(&env, &target))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Returns whether an owner has already approved a given intent.

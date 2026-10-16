@@ -200,7 +200,10 @@ impl StreamingContract {
         assert!(!stream.cancelled, "stream already cancelled");
 
         let claimable = Self::_claimable(&env, &stream);
-        let refund = stream.deposit - stream.claimed - claimable;
+        let refund = stream
+            .deposit
+            .saturating_sub(stream.claimed)
+            .saturating_sub(claimable);
 
         stream.cancelled = true;
         storage::save_stream(&env, stream_id, &stream);

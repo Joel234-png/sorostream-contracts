@@ -11,7 +11,7 @@
 //! 5. The guardian may `veto` a queued proposal before it executes.
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracterror, contracttype, token, Address, Env, Symbol, Val, Vec,
 };
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -55,8 +55,8 @@ pub struct Proposal {
     pub target: Address,
     /// Function name to call on the target.
     pub function: Symbol,
-    /// ABI-encoded arguments passed verbatim to the target.
-    pub calldata: Bytes,
+    /// ABI arguments passed to the target.
+    pub calldata: Vec<Val>,
     pub status: ProposalStatus,
     /// Ledger timestamp when voting opened.
     pub vote_start: u64,
@@ -86,6 +86,7 @@ pub enum GovernanceError {
     ProposalNotQueued = 10,
     InsufficientTokens = 11,
     InvalidParam = 12,
+    NoVoteToWithdraw = 13,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -138,6 +139,10 @@ fn mark_voted(env: &Env, proposal_id: u64, voter: &Address) {
     env.storage()
         .persistent()
         .set(&voted_key(env, proposal_id, voter), &true);
+}
+
+fn locked_balance_key(env: &Env, proposal_id: u64, voter: &Address) -> (Symbol, u64, Address) {
+    (Symbol::new(env, "locked"), proposal_id, voter.clone())
 }
 
 fn get_u64(env: &Env, key: &str, default: u64) -> u64 {
@@ -197,7 +202,7 @@ impl GovernanceContract {
         proposer: Address,
         target: Address,
         function: Symbol,
-        calldata: Bytes,
+        calldata: Vec<Val>,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
 
@@ -207,7 +212,8 @@ impl GovernanceContract {
         let threshold = get_u64(&env, PROPOSAL_THRESHOLD_KEY, 0);
 
         let balance = token::Client::new(&env, &token).balance(&proposer);
-        if (balance as u64) < threshold {
+        let balance = u64::try_from(balance).map_err(|_| GovernanceError::InvalidParam)?;
+        if balance < threshold {
             return Err(GovernanceError::InsufficientTokens);
         }
 
@@ -240,8 +246,9 @@ impl GovernanceContract {
 
     /// Casts a vote on an active proposal.
     ///
-    /// Vote weight equals the voter's current token balance (1 token = 1 vote).
-    /// Each address may vote only once per proposal.
+    /// Vote weight equals the voter's token balance when voting. Those tokens are
+    /// held in escrow until the voting period ends, preventing them from being
+    /// transferred and counted again through another address.
     pub fn vote(
         env: Env,
         voter: Address,
@@ -268,7 +275,20 @@ impl GovernanceContract {
         let token: Address = env.storage().instance()
             .get(&Symbol::new(&env, TOKEN_KEY))
             .ok_or(GovernanceError::NotInitialized)?;
-        let balance = token::Client::new(&env, &token).balance(&voter) as u64;
+        let token_client = token::Client::new(&env, &token);
+        let balance = token_client.balance(&voter);
+        let balance = u64::try_from(balance).map_err(|_| GovernanceError::InvalidParam)?;
+
+        if balance > 0 {
+            token_client.transfer(
+                &voter,
+                &env.current_contract_address(),
+                &(balance as i128),
+            );
+        }
+        env.storage()
+            .persistent()
+            .set(&locked_balance_key(&env, proposal_id, &voter), &balance);
 
         mark_voted(&env, proposal_id, &voter);
 
@@ -283,6 +303,42 @@ impl GovernanceContract {
             (Symbol::new(&env, "VoteCast"), proposal_id),
             (voter, support, balance),
         );
+
+        Ok(())
+    }
+
+    /// Returns escrowed voting tokens after the proposal's voting period ends.
+    pub fn withdraw_vote_tokens(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+    ) -> Result<(), GovernanceError> {
+        voter.require_auth();
+
+        let proposal = load_proposal(&env, proposal_id)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        if env.ledger().timestamp() <= proposal.vote_end {
+            return Err(GovernanceError::VotingNotActive);
+        }
+
+        let key = locked_balance_key(&env, proposal_id, &voter);
+        let balance: u64 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(GovernanceError::NoVoteToWithdraw)?;
+        env.storage().persistent().remove(&key);
+
+        if balance > 0 {
+            let token: Address = env.storage().instance()
+                .get(&Symbol::new(&env, TOKEN_KEY))
+                .ok_or(GovernanceError::NotInitialized)?;
+            token::Client::new(&env, &token).transfer(
+                &env.current_contract_address(),
+                &voter,
+                &(balance as i128),
+            );
+        }
 
         Ok(())
     }
@@ -345,10 +401,10 @@ impl GovernanceContract {
         proposal.status = ProposalStatus::Executed;
         save_proposal(&env, &proposal);
 
-        env.invoke_contract::<()>(
+        env.invoke_contract::<Val>(
             &proposal.target,
             &proposal.function,
-            Vec::from_array(&env, [soroban_sdk::IntoVal::into_val(&proposal.calldata, &env)]),
+            proposal.calldata,
         );
 
         env.events().publish(
@@ -470,3 +526,6 @@ impl GovernanceContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test;

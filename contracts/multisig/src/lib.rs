@@ -8,7 +8,8 @@
 //! 2. Each owner calls `approve(intent_id)` with their auth. The SDK's `require_auth`
 //!    enforces that the caller is who they claim to be.
 //! 3. When M approvals are collected the operation executes automatically.
-//! 4. Any owner can `cancel` an intent before it reaches the threshold.
+//! 4. The intent's proposer can `cancel` it before it reaches the threshold.
+//!    Other owners cannot unilaterally cancel an intent they did not propose.
 //!
 //! ## Owner management
 //! `add_owner`, `remove_owner`, and `change_threshold` are themselves guarded: callers
@@ -74,6 +75,7 @@ pub enum MultiSigError {
     OwnerNotFound = 10,
     ThresholdExceedsOwners = 11,
     DuplicateOwner = 12,
+    NotProposer = 13,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -330,7 +332,9 @@ impl MultiSigContract {
         }
     }
 
-    /// Cancels a pending intent. Any owner may cancel.
+    /// Cancels a pending intent. Only the original proposer may cancel;
+    /// other owners must not be able to unilaterally kill an intent they
+    /// did not propose (e.g. one already backed by several approvals).
     pub fn cancel(
         env: Env,
         owner: Address,
@@ -346,6 +350,10 @@ impl MultiSigContract {
 
         if intent.status != IntentStatus::Pending {
             return Err(MultiSigError::IntentNotPending);
+        }
+
+        if owner != intent.proposer {
+            return Err(MultiSigError::NotProposer);
         }
 
         intent.status = IntentStatus::Cancelled;
@@ -499,5 +507,80 @@ impl MultiSigContract {
             pending,
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{Address, Env};
+
+    fn setup(env: &Env) -> (Address, Address, Address, Address) {
+        env.mock_all_auths();
+        let owner1 = Address::generate(env);
+        let owner2 = Address::generate(env);
+        let owner3 = Address::generate(env);
+        let non_owner = Address::generate(env);
+        let owners = soroban_sdk::vec![env, owner1.clone(), owner2.clone(), owner3.clone()];
+        let contract_id = env.register(MultiSigContract, ());
+        let c = MultiSigContractClient::new(env, &contract_id);
+        c.initialize(&owners, &2);
+        (contract_id, owner1, owner2, non_owner)
+    }
+
+    #[test]
+    fn test_proposer_can_cancel_own_intent() {
+        let env = Env::default();
+        let (_id, owner1, owner2, _non_owner) = setup(&env);
+        let c = MultiSigContractClient::new(&env, &_id);
+
+        let target = Address::generate(&env);
+        let intent_id = c.propose(&owner1, &target, &soroban_sdk::Symbol::new(&env, "f"), &soroban_sdk::Bytes::new(&env), &1_000_000);
+
+        // owner1 (proposer) may cancel their own intent.
+        assert!(c.cancel(&owner1, &intent_id).is_ok());
+        let intent = c.get_intent(&intent_id).unwrap();
+        assert_eq!(intent.status, IntentStatus::Cancelled);
+        let _ = owner2;
+    }
+
+    #[test]
+    fn test_non_proposer_owner_cannot_cancel() {
+        let env = Env::default();
+        let (_id, owner1, owner2, _non_owner) = setup(&env);
+        let c = MultiSigContractClient::new(&env, &_id);
+
+        let target = Address::generate(&env);
+        let intent_id = c.propose(&owner1, &target, &soroban_sdk::Symbol::new(&env, "f"), &soroban_sdk::Bytes::new(&env), &1_000_000);
+
+        // owner2 did not propose → cannot unilaterally cancel.
+        let result = c.try_cancel(&owner2, &intent_id);
+        assert!(result.is_err());
+        match result {
+            Err(Ok(e)) => assert_eq!(e, MultiSigError::NotProposer),
+            _ => panic!("expected NotProposer"),
+        }
+
+        // Intent remains pending.
+        let intent = c.get_intent(&intent_id).unwrap();
+        assert_eq!(intent.status, IntentStatus::Pending);
+        let _ = (_id, owner1);
+    }
+
+    #[test]
+    fn test_non_owner_cannot_cancel() {
+        let env = Env::default();
+        let (_id, _owner1, _owner2, non_owner) = setup(&env);
+        let c = MultiSigContractClient::new(&env, &_id);
+
+        let target = Address::generate(&env);
+        let intent_id = c.propose(&_owner1, &target, &soroban_sdk::Symbol::new(&env, "f"), &soroban_sdk::Bytes::new(&env), &1_000_000);
+
+        let result = c.try_cancel(&non_owner, &intent_id);
+        assert!(result.is_err());
+        match result {
+            Err(Ok(e)) => assert_eq!(e, MultiSigError::NotOwner),
+            _ => panic!("expected NotOwner"),
+        }
     }
 }

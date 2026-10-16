@@ -25,6 +25,9 @@
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod storage_bench;
+
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
 };

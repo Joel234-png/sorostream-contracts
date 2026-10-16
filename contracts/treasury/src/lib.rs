@@ -444,5 +444,25 @@ mod test {
         let zero_addr = Address::from_string(&soroban_sdk::String::from_str(&t.env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
         c.set_treasury(&zero_addr);
     }
+
+    #[test]
+    fn test_distribute_succeeds_without_lp_pool_when_treasury_bps_is_10000() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+        c.set_treasury_split(&10_000u32);
+
+        assert_eq!(c.get_lp_pool(), None);
+
+        StellarAssetClient::new(&t.env, &t.token_id).mint(&t.treasury_id, &10_000);
+        c.deposit(&t.token_id, &10_000);
+
+        // lp_amount is 0, so read_lp_pool is never reached and no lp_pool is required.
+        let (treasury_amount, lp_amount) = c.distribute(&t.token_id, &t.admin);
+        assert_eq!(treasury_amount, 10_000);
+        assert_eq!(lp_amount, 0);
+        assert_eq!(c.get_balance(&t.token_id), 0);
+        assert!(c.get_lp_pool().is_none());
+    }
 }
 

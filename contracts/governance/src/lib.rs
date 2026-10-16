@@ -470,3 +470,66 @@ impl GovernanceContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(GovernanceContract, ());
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let c = GovernanceContractClient::new(&env, &contract_id);
+        assert!(c
+            .initialize(
+                &admin,
+                &guardian,
+                &token_id,
+                &100u64,
+                &10u64,
+                &0u64,
+                &0u64
+            )
+            .is_ok());
+        (env, contract_id, token_id)
+    }
+
+    #[test]
+    fn test_queue_on_already_defeated_proposal_rejected() {
+        let (env, contract_id, token_id) = setup();
+        let c = GovernanceContractClient::new(&env, &contract_id);
+        let proposer = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&proposer, &1000);
+
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "dummy");
+        let calldata = Bytes::new(&env);
+
+        env.ledger().set_timestamp(1000);
+        let proposal_id = c
+            .create_proposal(&proposer, &target, &function, &calldata)
+            .unwrap();
+
+        // advance time past the end of the voting period
+        env.ledger().set_timestamp(10_000_000);
+
+        // first queue: no votes cast, quorum not reached -> proposal defeated
+        let result = c.try_queue(&proposal_id);
+        assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
+        let proposal = c.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Defeated);
+
+        // second queue on an already-defeated proposal -> VotingNotActive,
+        // quorum is not re-evaluated
+        let result = c.try_queue(&proposal_id);
+        assert_eq!(result, Err(Ok(GovernanceError::VotingNotActive)));
+    }
+}

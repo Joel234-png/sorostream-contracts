@@ -8,8 +8,8 @@
 //!   5. simulate_claimable returns correct amounts at multiple time points.
 
 use crate::vesting_math::{
-    compute_claimable, compute_claimable_decay, compute_cumulative_decay, simulate_claimable,
-    DECAY_WINDOW_SECS,
+    compute_claimable, compute_claimable_decay, compute_claimable_from_milestones,
+    compute_cumulative_decay, compute_refund, simulate_claimable, DECAY_WINDOW_SECS,
 };
 
 // Also test the contract-level entrypoints.
@@ -152,6 +152,70 @@ fn test_decay_starts_at_zero() {
         "nothing should be vested before start_time"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mutation-testing guards for saturating arithmetic in vesting_math.rs
+// ---------------------------------------------------------------------------
+//
+// Each test below is designed to *fail* (panic) if the corresponding
+// `saturating_*` operation is replaced with a plain `+` / `-`. They exercise
+// timing/amount boundaries where a plain operator would underflow or overflow.
+
+/// `compute_refund` clamps at 0 via `deposit.saturating_sub(total_streamed)`.
+///
+/// With a flow_rate large enough that `total_streamed > deposit`, a plain `-`
+/// would underflow and panic (overflow-checks are on in test/release builds).
+#[test]
+fn test_compute_refund_saturating_sub_clamps_at_zero() {
+    let deposit = 1_000i128;
+    let flow_rate = 1_000_000i128; // streamed total far exceeds the deposit
+    let start_time = 0u64;
+    let end_time = 10_000u64;
+    let now = end_time; // boundary: fully streamed
+
+    let refund = compute_refund(deposit, flow_rate, now, end_time, start_time).unwrap();
+    assert_eq!(
+        refund, 0,
+        "refund must saturate at 0 when streamed exceeds deposit"
+    );
+}
+
+/// `compute_claimable_from_milestones` accumulates with `saturating_add`.
+///
+/// A released milestone at `i128::MAX` plus any further amount must saturate
+/// rather than overflow/panic under a plain `+`.
+#[test]
+fn test_compute_claimable_from_milestones_saturating_add_clamps_at_max() {
+    let milestones = [(i128::MAX, true), (1i128, true)];
+
+    let total = compute_claimable_from_milestones(&milestones);
+    assert_eq!(
+        total, i128::MAX,
+        "claimable from milestones must saturate at i128::MAX"
+    );
+}
+
+/// `compute_claimable_decay` subtracts the last cumulative value with
+/// `saturating_sub`. When `last_withdraw_time` is after `now`, the earlier
+/// cumulative value is larger and a plain `-` would underflow.
+#[test]
+fn test_compute_claimable_decay_saturating_sub_clamps_at_zero() {
+    let deposit = 1_000_000i128;
+    let start = 0u64;
+    let end = 10_000u64;
+    let cliff = 0u64;
+    let df = 500u32;
+
+    let claimable = compute_claimable_decay(
+        deposit, start, end, 1000 /* now */, cliff, 5000 /* last_withdraw_time */, df,
+    )
+    .unwrap();
+    assert_eq!(claimable, 0, "claimable must saturate at 0 when withdrawn ahead of now");
+}
+
+// ---------------------------------------------------------------------------
+// Contract-level integration tests
+// ---------------------------------------------------------------------------
 
 #[test]
 fn test_decay_precomputed_values() {

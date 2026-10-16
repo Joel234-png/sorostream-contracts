@@ -470,3 +470,133 @@ impl GovernanceContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient,
+        Address, Bytes, Env, Symbol,
+    };
+
+    struct TestEnv {
+        env: Env,
+        contract_id: Address,
+        token_id: Address,
+        admin: Address,
+        proposer: Address,
+    }
+
+    fn setup() -> TestEnv {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let contract_id = env.register(GovernanceContract, ());
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let proposer = Address::generate(&env);
+
+        StellarAssetClient::new(&env, &token_id).mint(&proposer, &1_000_000);
+
+        GovernanceContractClient::new(&env, &contract_id).initialize(
+            &admin,
+            &admin,
+            &token_id,
+            &100u64,
+            &1u64,
+            &0u64,
+            &0u64,
+        );
+
+        TestEnv {
+            env,
+            contract_id,
+            token_id,
+            admin,
+            proposer,
+        }
+    }
+
+    fn client(t: &TestEnv) -> GovernanceContractClient<'_> {
+        GovernanceContractClient::new(&t.env, &t.contract_id)
+    }
+
+    /// #773 — proposer whose balance is exactly equal to `proposal_threshold`
+    /// must be accepted (only `(balance as u64) < threshold` is rejected).
+    #[test]
+    fn test_create_proposal_balance_exactly_threshold() {
+        let t = setup();
+        let c = client(&t);
+
+        c.set_proposal_threshold(&t.admin, &1_000_000u64);
+
+        let id = c.create_proposal(
+            &t.proposer,
+            &t.proposer,
+            &Symbol::new(&t.env, "fn"),
+            &Bytes::from_array(&t.env, &[1u8, 2, 3]),
+        );
+        assert_eq!(id, Ok(1u64));
+
+        let proposal = c.get_proposal(&1u64).unwrap();
+        assert_eq!(proposal.calldata, Bytes::from_array(&t.env, &[1u8, 2, 3]));
+    }
+
+    /// #773 — proposer whose balance is just below threshold is rejected.
+    #[test]
+    fn test_create_proposal_balance_below_threshold_rejected() {
+        let t = setup();
+        let c = client(&t);
+
+        c.set_proposal_threshold(&t.admin, &1_000_001u64);
+
+        let result = c.try_create_proposal(
+            &t.proposer,
+            &t.proposer,
+            &Symbol::new(&t.env, "fn"),
+            &Bytes::from_array(&t.env, &[1u8, 2, 3]),
+        );
+        assert_eq!(
+            result,
+            Err(Ok(GovernanceError::InsufficientTokens))
+        );
+    }
+
+    /// #775 — create_proposal with calldata approaching Soroban's practical
+    /// ledger-entry / transaction size limit is accepted gracefully (not a
+    /// panic) and the calldata is stored verbatim.
+    #[test]
+    fn test_create_proposal_max_practical_calldata() {
+        let t = setup();
+        let c = client(&t);
+
+        // ~100 KiB calldata payload.
+        let size: usize = 100_000;
+        let mut calldata = Bytes::new(&t.env);
+        let chunk: Vec<u8> = vec![42u8; 10_000];
+        for _ in 0..10 {
+            calldata.extend_from_slice(&chunk);
+        }
+        assert_eq!(calldata.len(), size as u32);
+
+        let result = c.try_create_proposal(
+            &t.proposer,
+            &t.proposer,
+            &Symbol::new(&t.env, "fn"),
+            &calldata,
+        );
+        assert!(
+            result.is_ok(),
+            "large calldata must be accepted gracefully, not panic"
+        );
+        let id = result.unwrap();
+
+        let proposal = c.get_proposal(&id).unwrap();
+        assert_eq!(proposal.calldata.len(), size as u32);
+        assert_eq!(proposal.calldata, calldata);
+    }
+}

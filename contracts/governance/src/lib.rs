@@ -201,6 +201,10 @@ impl GovernanceContract {
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
 
+        if target == env.current_contract_address() {
+            return Err(GovernanceError::InvalidParam);
+        }
+
         let token: Address = env.storage().instance()
             .get(&Symbol::new(&env, TOKEN_KEY))
             .ok_or(GovernanceError::NotInitialized)?;

@@ -23,10 +23,14 @@ pub trait SoroStreamInterface {
     fn get_version(env: Env) -> Result<String, StreamError>;
     fn set_admin(env: Env, new_admin: Address) -> Result<(), StreamError>;
     fn set_fee_admin(env: Env, admin: Address, fee_admin: Address) -> Result<(), StreamError>;
+    fn transfer_fee_manager_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn get_fee_admin(env: Env) -> Option<Address>;
     fn set_emergency_admin(env: Env, admin: Address, emergency_admin: Address) -> Result<(), StreamError>;
+    fn transfer_emergency_pause_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn get_emergency_admin(env: Env) -> Option<Address>;
+    fn transfer_analytics_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn set_token_admin(env: Env, admin: Address, token_admin: Address) -> Result<(), StreamError>;
+    fn transfer_token_admin_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn get_token_admin(env: Env) -> Option<Address>;
     fn emergency_pause(env: Env) -> Result<(), StreamError>;
     fn emergency_resume(env: Env) -> Result<(), StreamError>;

@@ -78,6 +78,37 @@ pub fn compute_flow_rate(deposit: i128, duration_seconds: u64) -> i128 {
 }
 
 // ---------------------------------------------------------------------------
+// Cost comparison: Linear vs TimeDecay
+// ---------------------------------------------------------------------------
+//
+// On-chain resource/gas implications for a stream creator choosing between the
+// two curves (see [`VestingCurve`] in types.rs):
+//
+// | Curve     | On-chain work per `withdraw`/`compute_claimable` call           | Storage reads | Best for                            |
+// |-----------|-----------------------------------------------------------------|---------------|-------------------------------------|
+| Linear    | Single multiply: `flow_rate × elapsed`                          | 0 (pure math) | Long-duration streams; lowest cost  |
+// | TimeDecay | Iterative loop: one `checked_mul` + `checked_div` per 1 ks window | 0 (pure math) | Front-weighted vesting; higher cost |
+//
+// Linear is O(1) — one multiplication regardless of stream length, so it is
+// the cheapest option and the safe default for multi-year streams.
+//
+// TimeDecay is O(windows) where `windows = elapsed / DECAY_WINDOW_SECS`.
+// Each window iteration performs a fixed-point multiply and division, so cost
+// grows linearly with stream duration. For a 1-year stream (~31.5M seconds)
+// that is ~31 500 loop iterations — roughly 30 000× the arithmetic of Linear.
+// Use TimeDecay only when front-weighted release is genuinely required, and
+// prefer shorter durations or larger windows to keep the iteration count low.
+//
+// Both curves are pure arithmetic (zero storage reads) and `decay_factor == 0`
+// degenerates to the linear formula, so a TimeDecay stream with a zero factor
+// costs the same as Linear.
+//
+// # Convergence guarantee
+//
+// When `query_time >= end_time` both curves return exactly `deposit`, so the
+// full amount is always reachable at stream end regardless of curve choice.
+
+// ---------------------------------------------------------------------------
 // Time-decay (exponential front-weighting) helpers
 // ---------------------------------------------------------------------------
 

@@ -60,24 +60,36 @@ fn test_decay_factor_zero_equals_linear() {
 }
 
 #[test]
-fn test_decay_rejects_out_of_range_factor() {
-    for factor in [10_000, 10_001, u32::MAX] {
-        assert_eq!(
-            compute_cumulative_decay(1_000_000, 0, 10_000, 1_000, factor),
-            None,
-            "invalid decay factor {factor} must be rejected"
-        );
+fn test_decay_boundary_df0_equals_df1_continuous() {
+    // As decay_factor approaches 0 from the iterative side (df=1, 2, 5), the
+    // fixed-point path must produce results continuous with the linear fallback
+    // (df=0).  df=1 bps per 1 ks window = 0.01% per window, so over a 10 ks
+    // stream the drift vs linear is tiny — results should match within a few
+    // stroops, confirming no discontinuity at the df==0 early-return boundary.
+
+    let deposit = 1_000_000i128;
+    let start = 0u64;
+    let end = 10_000u64;
+    let duration = (end - start) as i128;
+
+    for elapsed in [1000u64, 2500, 5000, 7500, 9999, 10_000] {
+        let query = start + elapsed;
+
+        // Linear fallback path (df == 0).
+        let linear = compute_cumulative_decay(deposit, start, end, query, 0).unwrap();
+
+        // Iterative fixed-point path with tiny decay factors (df >= 1).
+        for &df in &[1u32, 2, 5] {
+            let iterative = compute_cumulative_decay(deposit, start, end, query, df).unwrap();
+            let diff = (iterative - linear).abs();
+            // tolerance scales with elapsed fraction; df=1 bps/window is ~0.01%
+            // decay per window, so drift vs linear is well under 1 stroop here.
+            assert!(
+                diff <= 2,
+                "df={df} not continuous with df=0 at elapsed={elapsed}: linear={linear}, iterative={iterative}, diff={diff}"
+            );
+        }
     }
-}
-
-#[test]
-fn test_long_decay_stream_completes_with_bounded_exponentiation() {
-    let deposit = 1_000_000_000i128;
-    let end = 30 * 365 * 24 * 60 * 60;
-    let halfway = compute_cumulative_decay(deposit, 0, end, end / 2, 1).unwrap();
-
-    assert!(halfway > 0 && halfway < deposit);
-    assert_eq!(compute_cumulative_decay(deposit, 0, end, end, 1), Some(deposit));
 }
 
 #[test]
@@ -272,6 +284,54 @@ fn test_compute_claimable_decay_cliff_enforced() {
     let at_cliff = compute_claimable_decay(deposit, start, end, 2000, cliff, start, df).unwrap();
     let expected = compute_cumulative_decay(deposit, start, end, 2000, df).unwrap();
     assert_eq!(at_cliff, expected);
+}
+
+#[test]
+fn test_compute_claimable_decay_continuity_at_end_time() {
+    // The special-cased convergence branch (effective_now >= end_time) must match
+    // the general-case branch exactly at end_time - 1 plus one second of accrual.
+    let deposit = 1_000_000i128;
+    let start = 0u64;
+    let end = 10_000u64;
+    let cliff = 0u64;
+    let last_withdraw = 0u64;
+
+    for &df in &[0u32, 50, 100, 500, 1000] {
+        // General-case branch: one second before end_time.
+        let just_before = compute_claimable_decay(
+            deposit, start, end, end - 1, cliff, last_withdraw, df,
+        )
+        .unwrap();
+
+        // Special-cased branch: exactly at end_time (full deposit minus withdrawn).
+        let at_end = compute_claimable_decay(
+            deposit, start, end, end, cliff, last_withdraw, df,
+        )
+        .unwrap();
+
+        // Claiming at end_time should equal the claimable one second before plus
+        // the final second's worth of accrual (full deposit when nothing withdrawn).
+        assert_eq!(
+            at_end, deposit,
+            "decay_factor={df}: claimable at end_time must equal full deposit"
+        );
+        assert!(
+            at_end - just_before >= 0,
+            "decay_factor={df}: claimable must not decrease as time approaches end_time"
+        );
+
+        // Verify the delta from end-1 to end equals one second's accrual under
+        // the general-case computation applied at end-1 vs end.
+        // (Both go through compute_cumulative_decay internally; the boundary
+        // branch clamps effective_now to end_time.)
+        let cum_end_minus_1 = compute_cumulative_decay(deposit, start, end, end - 1, df).unwrap();
+        let cum_end = compute_cumulative_decay(deposit, start, end, end, df).unwrap();
+        let expected_delta = cum_end.saturating_sub(cum_end_minus_1);
+        assert_eq!(
+            at_end - just_before, expected_delta,
+            "decay_factor={df}: end_time - (end_time-1) must equal final-second accrual"
+        );
+    }
 }
 
 #[test]

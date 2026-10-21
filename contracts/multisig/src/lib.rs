@@ -15,6 +15,12 @@
 //! `add_owner`, `remove_owner`, and `change_threshold` are themselves guarded: callers
 //! must route them through `propose` + `approve` so the multi-sig approves its own
 //! configuration changes.
+//!
+//! Self-targeting intents still enter these same guarded contract methods, so their
+//! owner-count and threshold checks are unchanged. The generic `approve` execution
+//! path currently supplies calldata as one `Bytes` argument; typed methods such as
+//! these therefore cannot be reached through that path until issue #717 is fixed.
+//! This is an execution limitation, not a confirmed invariant bypass.
 
 #[cfg(test)]
 mod test;
@@ -216,6 +222,9 @@ fn read_pending_admin(env: &Env) -> Option<Address> {
 
 #[contract]
 pub struct MultiSigContract;
+
+#[cfg(test)]
+mod tests;
 
 #[contractimpl]
 impl MultiSigContract {

@@ -20,6 +20,9 @@ pub mod vesting_math;
 pub mod composability;
 pub mod roles;
 
+// Role resource regression benchmark.
+#[cfg(test)] mod role_cost_bench;
+
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
 pub use types::{AuditEntry, CreateStreamOptions, CreateStreamParams, HealthStatus, Stats, Stream, StreamHealth, StreamOptions, StreamStatus, StreamTransition, VestingCurve, StreamQueryFilter, WithdrawalProof, WithdrawalRecord};

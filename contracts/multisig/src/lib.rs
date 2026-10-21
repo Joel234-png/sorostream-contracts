@@ -20,7 +20,7 @@
 mod test;
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, Address, Bytes, Env, Symbol, Vec,
+    contract, contractimpl, contracterror, contracttype, Address, Bytes, Env, Symbol, Val, Vec,
 };
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
@@ -55,7 +55,7 @@ pub struct Intent {
     pub target: Address,
     /// Function name to call on the target.
     pub function: Symbol,
-    /// ABI-encoded arguments passed verbatim to the target.
+    /// XDR-encoded `Vec<Val>` arguments passed to the target; empty bytes means no arguments.
     pub calldata: Bytes,
     pub status: IntentStatus,
     /// Ledger timestamp after which the intent can no longer be approved.
@@ -196,6 +196,14 @@ fn mark_approved(env: &Env, intent_id: u64, owner: &Address) {
         .set(&approval_key(env, intent_id, owner), &true);
 }
 
+fn decode_calldata(env: &Env, calldata: &Bytes) -> Result<Vec<Val>, MultiSigError> {
+    if calldata.len() == 0 {
+        return Ok(Vec::new(env));
+    }
+    env.from_xdr::<Vec<Val>>(calldata)
+        .map_err(|_| MultiSigError::InvalidCalldata)
+}
+
 fn read_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, ADMIN_KEY))
 }
@@ -252,6 +260,8 @@ impl MultiSigContract {
     ///
     /// Returns the `intent_id` to share with other owners for approval.
     /// `expiry` is a ledger timestamp after which the intent can no longer be executed.
+    /// `calldata` must contain the XDR encoding of the target's `Vec<Val>` arguments,
+    /// or be empty for a target function with no arguments.
     pub fn propose(
         env: Env,
         proposer: Address,
@@ -264,6 +274,7 @@ impl MultiSigContract {
         if !is_owner(&env, &proposer) {
             return Err(MultiSigError::NotOwner);
         }
+        decode_calldata(&env, &calldata)?;
 
         let nonce = get_and_increment_nonce(&env);
         let id = next_intent_id(&env);
@@ -358,10 +369,11 @@ impl MultiSigContract {
                 threshold,
             );
 
-            env.invoke_contract::<()>(
+            let args = decode_calldata(&env, &intent.calldata)?;
+            let _ = env.invoke_contract::<Val>(
                 &intent.target,
                 &intent.function,
-                Vec::from_array(&env, [soroban_sdk::IntoVal::into_val(&intent.calldata, &env)]),
+                args,
             );
 
             env.events().publish(

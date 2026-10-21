@@ -988,7 +988,13 @@ pub fn effective_sender_limit(env: &Env, sender: &Address) -> u32 {
     get_sender_limit(env, sender).unwrap_or_else(|| get_max_streams_per_sender(env))
 }
 
-// --- Audit log helpers (circular buffer, capacity = 20) ---
+// --- Audit log helpers (bounded circular buffer, capacity = 20) ---
+//
+// The audit log is deliberately bounded and is NOT subject to the unbounded
+// growth pattern previously fixed for the sender/recipient indexes (issues #6/#7/#8).
+// Entries are stored in a fixed-size ring buffer of `AUDIT_CAP` slots; once full,
+// new entries overwrite the oldest. Total stored entries never exceed `AUDIT_CAP`,
+// so storage growth is constant regardless of the number of admin actions.
 
 const AUDIT_HEAD_KEY: Symbol = symbol_short!("al_head");
 const AUDIT_LEN_KEY: Symbol = symbol_short!("al_len");
@@ -998,7 +1004,10 @@ fn audit_slot_key(env: &Env, idx: u32) -> (Symbol, u32) {
     (symbol_short!("al"), idx)
 }
 
-/// Appends an audit entry to the circular buffer.
+/// Appends an audit entry to the bounded circular buffer.
+///
+/// Overwrites the oldest entry once the buffer is full, so the log never grows
+/// beyond `AUDIT_CAP` entries (see module doc above).
 pub fn append_audit_entry(env: &Env, entry: &AuditEntry) {
     let head: u32 = env.storage().instance().get(&AUDIT_HEAD_KEY).unwrap_or(0u32);
     let len: u32 = env.storage().instance().get(&AUDIT_LEN_KEY).unwrap_or(0u32);

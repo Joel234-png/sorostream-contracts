@@ -193,8 +193,17 @@ impl TreasuryContract {
     }
 
     /// Sets the LP reward pool address. Only admin may call this.
+    ///
+    /// Rejects the zero/burn address and the treasury contract's own address
+    /// (a self-referential split would route LP rewards back into the treasury).
     pub fn set_lp_pool(env: Env, lp_pool: Address) {
         check_admin(&env);
+        if is_zero_address(&env, &lp_pool) {
+            panic!("InvalidLpPoolAddress");
+        }
+        if lp_pool == env.current_contract_address() {
+            panic!("LpPoolIsTreasuryContract");
+        }
         env.storage()
             .instance()
             .set(&Symbol::new(&env, LP_POOL_KEY), &lp_pool);
@@ -218,6 +227,10 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, TREASURY_SPLIT_BPS_KEY), &treasury_bps);
+        env.events().publish(
+            (Symbol::new(&env, "TreasurySplitSet"),),
+            treasury_bps,
+        );
     }
 
     /// Returns the configured treasury split in basis points.
@@ -421,6 +434,23 @@ mod test {
     }
 
     #[test]
+    fn test_withdraw_treasury_exact_balance() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+
+        StellarAssetClient::new(&t.env, &t.token_id).mint(&t.treasury_id, &10_000);
+        c.deposit(&t.token_id, &10_000);
+
+        // Full withdrawal via the non-withdraw_all path: amount == balance.
+        c.withdraw_treasury(&t.token_id, &10_000, &t.user);
+
+        let user_balance = TokenClient::new(&t.env, &t.token_id).balance(&t.user);
+        assert_eq!(user_balance, 10_000);
+        assert_eq!(c.get_balance(&t.token_id), 0);
+    }
+
+    #[test]
     fn test_withdraw_all() {
         let t = setup();
         let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
@@ -456,6 +486,26 @@ mod test {
         c.initialize(&t.admin);
         let zero_addr = Address::from_string(&soroban_sdk::String::from_str(&t.env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"));
         c.set_treasury(&zero_addr);
+    }
+
+    #[test]
+    fn test_distribute_succeeds_without_lp_pool_when_treasury_bps_is_10000() {
+        let t = setup();
+        let c = TreasuryContractClient::new(&t.env, &t.treasury_id);
+        c.initialize(&t.admin);
+        c.set_treasury_split(&10_000u32);
+
+        assert_eq!(c.get_lp_pool(), None);
+
+        StellarAssetClient::new(&t.env, &t.token_id).mint(&t.treasury_id, &10_000);
+        c.deposit(&t.token_id, &10_000);
+
+        // lp_amount is 0, so read_lp_pool is never reached and no lp_pool is required.
+        let (treasury_amount, lp_amount) = c.distribute(&t.token_id, &t.admin);
+        assert_eq!(treasury_amount, 10_000);
+        assert_eq!(lp_amount, 0);
+        assert_eq!(c.get_balance(&t.token_id), 0);
+        assert!(c.get_lp_pool().is_none());
     }
 }
 

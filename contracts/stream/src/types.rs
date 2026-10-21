@@ -22,6 +22,16 @@ pub enum VestingCurve {
     ///
     /// A `decay_factor` of `0` degenerates to linear behaviour.
     /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
+    ///
+    /// # Resource / gas cost
+    ///
+    /// `TimeDecay` is more expensive than [`VestingCurve::Linear`] on-chain:
+    /// each claimable computation iterates once per 1 000-second window,
+    /// performing a fixed-point multiply and division per window
+    /// ([`crate::vesting_math::compute_cumulative_decay`]). Cost grows linearly
+    /// with stream duration — roughly 31 500 iterations for a one-year stream
+    /// versus a single multiplication for Linear. Prefer `Linear` for
+    /// long-duration streams unless front-weighted release is required.
     TimeDecay(u32),
 }
 

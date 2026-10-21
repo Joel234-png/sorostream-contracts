@@ -146,6 +146,16 @@ impl ProxyContract {
         read_storage_version(&env)
     }
 
+    /// Returns the current implementation WASM hash and storage layout version
+    /// in a single call, so callers observe the implementation+version pairing
+    /// consistently (both are read together, as `upgrade()` writes them together).
+    pub fn get_impl_storage_info(env: Env) -> Result<(BytesN<32>, u32), ProxyError> {
+        Ok((
+            read_impl_hash(&env).ok_or(ProxyError::NotInitialized)?,
+            read_storage_version(&env),
+        ))
+    }
+
     /// Upgrades the implementation to a new WASM hash.
     ///
     /// `expected_storage_version` must match the currently stored version; this
@@ -240,6 +250,24 @@ mod test {
     }
 
     #[test]
+    fn test_get_impl_storage_info_returns_atomic_pair() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &1u32);
+
+        let (hash, version) = c.get_impl_storage_info();
+        assert_eq!(hash, impl_hash);
+        assert_eq!(version, 1u32);
+
+        let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+        c.upgrade(&new_hash, &1u32, &2u32);
+
+        let (hash, version) = c.get_impl_storage_info();
+        assert_eq!(hash, new_hash);
+        assert_eq!(version, 2u32);
+    }
+
+    #[test]
     fn test_double_initialize_fails() {
         let (env, contract_id, admin, impl_hash) = setup();
         let c = ProxyContractClient::new(&env, &contract_id);
@@ -272,6 +300,34 @@ mod test {
         // Wrong expected version: contract is at v1, we claim v0
         let result = c.try_upgrade(&new_hash, &0u32, &2u32);
         assert_eq!(result, Err(Ok(ProxyError::StorageVersionMismatch)));
+    }
+
+    #[test]
+    fn test_upgrade_accepts_new_storage_version_lower_than_current() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &5u32);
+
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        // expected matches current (5), but new_storage_version (3) moves backward
+        let result = c.try_upgrade(&new_hash, &5u32, &3u32);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(c.get_impl_hash(), new_hash);
+        assert_eq!(c.get_storage_version(), 3u32);
+    }
+
+    #[test]
+    fn test_upgrade_accepts_new_storage_version_equal_to_current() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &5u32);
+
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        // expected matches current (5), new_storage_version equals current (5)
+        let result = c.try_upgrade(&new_hash, &5u32, &5u32);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(c.get_impl_hash(), new_hash);
+        assert_eq!(c.get_storage_version(), 5u32);
     }
 
     #[test]

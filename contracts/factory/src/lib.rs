@@ -26,8 +26,11 @@
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod storage_bench;
+
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -48,6 +51,9 @@ pub struct DeploymentInfo {
     pub deploy_timestamp: u64,
     /// WASM hash used for this deployment (encodes the contract version).
     pub wasm_hash: BytesN<32>,
+    /// Optional human-readable label supplied by the deployer (e.g.
+    /// "production-mainnet-v2") for dashboard identification.
+    pub label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -56,8 +62,8 @@ pub struct DeploymentInfo {
 
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
-const CONTRACT_COUNT_KEY: &str = "contract_count";
-const CONTRACT_PREFIX: &str = "contract";
+const CONTRACTS_KEY: &str = "contracts";
+const CONTRACTS_COUNT_KEY: &str = "contracts_count";
 const INFO_PREFIX: &str = "info";
 const MAX_DEPLOYMENT_PAGE_SIZE: u32 = 20;
 
@@ -67,6 +73,10 @@ fn admin_key(env: &Env) -> Symbol {
 
 fn contract_index_key(env: &Env, index: u32) -> (Symbol, u32) {
     (Symbol::new(env, CONTRACT_PREFIX), index)
+}
+
+fn contracts_count_key(env: &Env) -> Symbol {
+    Symbol::new(env, CONTRACTS_COUNT_KEY)
 }
 
 fn info_key(env: &Env, addr: &Address) -> (Symbol, Address) {
@@ -97,6 +107,8 @@ pub enum FactoryError {
     Unauthorized = 2,
     /// Factory has not been initialised yet.
     NotInitialized = 3,
+    /// The proposed admin is the same as the current admin.
+    NewAdminSameAsCurrent = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +137,9 @@ impl StreamFactory {
         }
         admin.require_auth();
         env.storage().instance().set(&admin_key(&env), &admin);
+        env.storage()
+            .persistent()
+            .set(&contracts_count_key(&env), &0u32);
         Ok(())
     }
 
@@ -142,6 +157,8 @@ impl StreamFactory {
     /// * `wasm_hash` - SHA-256 hash of the child contract WASM (previously
     ///   uploaded via `env.deployer().upload_contract_wasm()`).
     /// * `salt` - 32-byte salt used to derive the deterministic address.
+    /// * `label` - Optional human-readable label attached to the deployment
+    ///   (e.g. "production-mainnet-v2") for dashboard identification.
     ///
     /// # Returns
     /// The `Address` of the newly deployed child contract.
@@ -150,6 +167,7 @@ impl StreamFactory {
         admin: Address,
         wasm_hash: BytesN<32>,
         salt: BytesN<32>,
+        label: Option<String>,
     ) -> Result<Address, FactoryError> {
         // Auth + admin check.
         admin.require_auth();
@@ -174,7 +192,8 @@ impl StreamFactory {
             deployer: admin.clone(),
             deploy_ledger: env.ledger().sequence(),
             deploy_timestamp: env.ledger().timestamp(),
-            wasm_hash: wasm_hash.clone(),
+            wasm_hash,
+            label,
         };
         env.storage()
             .persistent()
@@ -188,16 +207,10 @@ impl StreamFactory {
             .unwrap_or(0);
         env.storage()
             .persistent()
-            .set(&contract_index_key(&env, count), &child_address);
-        env.storage().persistent().set(
-            &Symbol::new(&env, CONTRACT_COUNT_KEY),
-            &count.checked_add(1).expect("deployment count overflow"),
-        );
-
-        env.events().publish(
-            (Symbol::new(&env, "StreamContractDeployed"), child_address.clone()),
-            (admin, wasm_hash),
-        );
+            .set(&contracts_key(&env), &list);
+        env.storage()
+            .persistent()
+            .set(&contracts_count_key(&env), &list.len());
 
         Ok(child_address)
     }
@@ -232,6 +245,26 @@ impl StreamFactory {
         page
     }
 
+    /// Returns the number of deployed child contracts without loading the registry.
+    ///
+    /// For factories created before this count was persisted, falls back to the
+    /// registry length until the next deployment records the count.
+    pub fn get_deployed_contract_count(env: Env) -> u32 {
+        if let Some(count) = env
+            .storage()
+            .persistent()
+            .get(&contracts_count_key(&env))
+        {
+            return count;
+        }
+
+        env.storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&contracts_key(&env))
+            .unwrap_or(Vec::new(&env))
+            .len()
+    }
+
     /// Returns deployment metadata for a single child contract address.
     ///
     /// Returns `None` if the address was not deployed through this factory.
@@ -254,6 +287,9 @@ impl StreamFactory {
             .get(&admin_key(&env))
             .ok_or(FactoryError::NotInitialized)?;
         admin.require_auth();
+        if new_admin == admin {
+            return Err(FactoryError::NewAdminSameAsCurrent);
+        }
         env.storage()
             .instance()
             .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
@@ -285,7 +321,7 @@ impl StreamFactory {
             .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
         env.events().publish(
             (Symbol::new(&env, "AdminTransferAccepted"),),
-            (current_admin, accepted_by),
+            accepted_by,
         );
         Ok(())
     }

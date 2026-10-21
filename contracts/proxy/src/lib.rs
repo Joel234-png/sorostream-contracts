@@ -35,6 +35,7 @@ pub enum ProxyError {
     NotAdmin = 3,
     StorageVersionMismatch = 4,
     MigrationAlreadyApplied = 5,
+    MigrationFailed = 6,
 }
 
 fn read_admin(env: &Env) -> Option<Address> {
@@ -189,9 +190,16 @@ impl ProxyContract {
     /// Upgrades the proxy contract's own WASM (not the implementation).
     ///
     /// This is separate from `upgrade()` which replaces the implementation hash.
-    /// Use this to update the proxy logic itself.
-    pub fn upgrade_proxy(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ProxyError> {
+    /// `expected_storage_version` must match the current storage layout version.
+    pub fn upgrade_proxy(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_storage_version: u32,
+    ) -> Result<(), ProxyError> {
         let _admin = check_admin(&env);
+        if read_storage_version(&env) != expected_storage_version {
+            return Err(ProxyError::StorageVersionMismatch);
+        }
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -207,7 +215,7 @@ impl ProxyContract {
         to_version: String,
     ) -> Result<(), ProxyError> {
         let _admin = check_admin(&env);
-        let _ = env.invoke_contract::<Result<(), soroban_sdk::Error>>(
+        let migration_result = env.invoke_contract::<Result<(), soroban_sdk::Error>>(
             &impl_contract,
             &Symbol::new(&env, "migrate"),
             soroban_sdk::vec![
@@ -216,6 +224,9 @@ impl ProxyContract {
                 soroban_sdk::IntoVal::into_val(&to_version, &env),
             ],
         );
+        if migration_result.is_err() {
+            return Err(ProxyError::MigrationFailed);
+        }
         env.events().publish(
             (Symbol::new(&env, "ProxyMigrated"),),
             (from_version, to_version),
@@ -227,7 +238,24 @@ impl ProxyContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+    use soroban_sdk::{contracterror, contractimpl, contract, testutils::Address as _, Address, BytesN, Env, IntoVal};
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[repr(u32)]
+    enum MockMigrationError {
+        Failed = 1,
+    }
+
+    #[contract]
+    struct MockMigrationContract;
+
+    #[contractimpl]
+    impl MockMigrationContract {
+        fn migrate(_env: Env, _from: String, _to: String) -> Result<(), MockMigrationError> {
+            Err(MockMigrationError::Failed)
+        }
+    }
 
     fn setup() -> (Env, Address, Address, BytesN<32>) {
         let env = Env::default();

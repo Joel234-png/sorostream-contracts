@@ -117,6 +117,10 @@ fn remove_owner_storage(env: &Env, addr: &Address) {
                     .get(&owner_slot_key(env, last))
                     .unwrap();
                 env.storage().persistent().set(&owner_slot_key(env, i), &last_addr);
+                env.events().publish(
+                    (Symbol::new(env, "OwnerSlotChanged"), last_addr),
+                    (last, i),
+                );
             }
             env.storage().persistent().remove(&owner_slot_key(env, last));
             env.storage().instance().set(&Symbol::new(env, OWNER_COUNT_KEY), &last);

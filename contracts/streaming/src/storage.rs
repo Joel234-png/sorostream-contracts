@@ -4,9 +4,15 @@ use crate::types::{DataKey, Stream, StreamProposal};
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 // Approximately 30 days at ~6-second average ledger close time.
+#[cfg(not(test))]
 const LEDGER_BUMP_AMOUNT: u32 = 518_400;
+#[cfg(test)]
+const LEDGER_BUMP_AMOUNT: u32 = 100;
 // Extend when fewer than 25 days of TTL remain.
+#[cfg(not(test))]
 const LEDGER_THRESHOLD: u32 = 432_000;
+#[cfg(test)]
+const LEDGER_THRESHOLD: u32 = 50;
 
 // ── Stream helpers ────────────────────────────────────────────────────────────
 
@@ -18,7 +24,13 @@ const LEDGER_THRESHOLD: u32 = 432_000;
 ///
 /// `nonce` is a per-call counter stored in contract instance storage that ensures
 /// two streams created in the same ledger second get distinct IDs.
-pub fn derive_stream_id(env: &Env, sender: &Address, recipient: &Address, timestamp: u64, nonce: u64) -> u64 {
+pub fn derive_stream_id(
+    env: &Env,
+    sender: &Address,
+    recipient: &Address,
+    timestamp: u64,
+    nonce: u64,
+) -> u64 {
     let mut buf = Bytes::new(env);
     buf.append(&sender.to_xdr(env));
     buf.append(&recipient.to_xdr(env));
@@ -56,9 +68,22 @@ pub fn next_nonce(env: &Env) -> u64 {
 
 /// Returns `true` if a stream with the given ID already exists in persistent storage.
 pub fn stream_id_exists(env: &Env, stream_id: u64) -> bool {
+    env.storage().persistent().has(&DataKey::Stream(stream_id))
+}
+
+pub fn proposal_exists(env: &Env, proposal_id: u64) -> bool {
     env.storage()
         .persistent()
-        .has(&DataKey::Stream(stream_id))
+        .has(&DataKey::Proposal(proposal_id))
+}
+
+pub fn bump_stream_ttl(env: &Env, stream_id: u64) -> u32 {
+    env.storage().persistent().extend_ttl(
+        &DataKey::Stream(stream_id),
+        LEDGER_THRESHOLD,
+        LEDGER_BUMP_AMOUNT,
+    );
+    env.ledger().sequence().saturating_add(LEDGER_BUMP_AMOUNT)
 }
 
 pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {

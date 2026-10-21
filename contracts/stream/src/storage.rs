@@ -52,8 +52,9 @@ pub fn write_migration_admin(env: &Env, admin: &Address) {
         .set(&Symbol::new(env, MIGRATION_ADMIN_KEY), admin);
 }
 
-/// Reads the designated migration admin address.  Falls back to the contract
-/// admin when no dedicated migration admin has been set.
+/// Reads the migration authority, falling back to the full contract admin when
+/// no dedicated migration admin has been set. Separation of duties only applies
+/// after `write_migration_admin` explicitly configures a migration role.
 pub fn read_migration_admin(env: &Env) -> Option<Address> {
     env.storage()
         .instance()
@@ -61,11 +62,19 @@ pub fn read_migration_admin(env: &Env) -> Option<Address> {
         .or_else(|| read_admin(env))
 }
 
-/// Asserts that the current caller is the admin. Panics otherwise.
-pub fn check_admin(env: &Env) {
-    read_admin(env)
-        .expect("contract not initialized")
-        .require_auth();
+/// Reads only an explicitly configured migration admin, without the admin fallback.
+pub fn read_explicit_migration_admin(env: &Env) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, MIGRATION_ADMIN_KEY))
+}
+
+/// Requires the initialized contract admin. Returns a typed error before
+/// initialization, while authorization failures retain Soroban auth behavior.
+pub fn check_admin(env: &Env) -> Result<(), crate::errors::StreamError> {
+    let admin = read_admin(env).ok_or(crate::errors::StreamError::NotInitialized)?;
+    admin.require_auth();
+    Ok(())
 }
 
 /// Derives a deterministic stream ID from sender, recipient, start_time, and nonce.

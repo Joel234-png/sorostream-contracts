@@ -384,9 +384,30 @@ pub struct CreateStreamOptions {
     pub collateral_vault_recipient_bps: Option<u32>,
 }
 
+/// Shared renewal-cap behavior for stream creation inputs.
+pub trait RenewalLimit {
+    fn renew_count(&self) -> Option<u32>;
+    fn recurrence(&self) -> Option<u32>;
+
+    /// Returns the preferred recurrence cap, falling back to the legacy alias.
+    fn effective_renew_count(&self) -> Option<u32> {
+        effective_renew_count(self.recurrence(), self.renew_count())
+    }
+}
+
+fn effective_renew_count(recurrence: Option<u32>, renew_count: Option<u32>) -> Option<u32> {
+    recurrence.or(renew_count)
+}
+
+impl RenewalLimit for CreateStreamOptions {
+    fn renew_count(&self) -> Option<u32> { self.renew_count }
+    fn recurrence(&self) -> Option<u32> { self.recurrence }
+}
+
 impl CreateStreamOptions {
+    /// Returns recurrence when set, otherwise the legacy renewal limit.
     pub fn effective_renew_count(&self) -> Option<u32> {
-        self.recurrence.or(self.renew_count)
+        RenewalLimit::effective_renew_count(self)
     }
 }
 
@@ -610,35 +631,6 @@ pub struct StreamQueryFilter {
     pub recipient: Option<Address>,
 }
 
-/// Less-frequently-varied options for `create_stream`, bundled into a single
-/// struct so the entry point stays within Soroban's 10-parameter contract
-/// function limit.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StreamCreateOptions {
-    /// Optional limit on the number of auto-renewals (see `Stream::renew_count`).
-    ///
-    /// Kept for backward compatibility. `recurrence` takes precedence when both
-    /// fields are set, which allows payroll-style stream creation to use the
-    /// clearer recurrence terminology without breaking legacy callers.
-    pub renew_count: Option<u32>,
-    /// Optional recurrence cap for payroll-style streams.
-    ///
-    /// `None` means unlimited renewals; `Some(n)` allows the stream to renew up
-    /// to `n` times before completing.
-    pub recurrence: Option<u32>,
-    /// Whether the recipient is allowed to terminate the stream early.
-    pub allow_recipient_termination: bool,
-    /// Whether the stream's recipient rights are locked to the original recipient.
-    pub non_transferable: bool,
-}
-
-impl StreamCreateOptions {
-    pub fn effective_renew_count(&self) -> Option<u32> {
-        self.recurrence.or(self.renew_count)
-    }
-}
-
 /// All creation-time parameters for `create_stream`, bundled into one struct
 /// so the public entry point stays within Soroban's 10-argument function limit.
 #[contracttype]
@@ -685,9 +677,15 @@ pub struct CreateStreamParams {
     pub metadata_uri: Option<String>,
 }
 
+impl RenewalLimit for CreateStreamParams {
+    fn renew_count(&self) -> Option<u32> { self.renew_count }
+    fn recurrence(&self) -> Option<u32> { self.recurrence }
+}
+
 impl CreateStreamParams {
+    /// Returns recurrence when set, otherwise the legacy renewal limit.
     pub fn effective_renew_count(&self) -> Option<u32> {
-        self.recurrence.or(self.renew_count)
+        RenewalLimit::effective_renew_count(self)
     }
 }
 

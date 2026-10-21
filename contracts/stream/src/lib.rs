@@ -22,12 +22,14 @@ pub mod roles;
 
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
-pub use types::{AuditEntry, CreateStreamOptions, CreateStreamParams, HealthStatus, Stats, Stream, StreamHealth, StreamOptions, StreamStatus, StreamTransition, VestingCurve, StreamQueryFilter, WithdrawalProof, WithdrawalRecord};
+pub use types::{AuditEntry, CreateStreamOptions, CreateStreamParams, HealthStatus, RenewalLimit, Stats, Stream, StreamHealth, StreamOptions, StreamStatus, StreamTransition, VestingCurve, StreamQueryFilter, WithdrawalProof, WithdrawalRecord};
 pub use oracle::IPriceOracle;
 pub use composability::ISoroStreamComposability;
 pub use roles::{AdminRole, RoleHolders};
 
 #[cfg(test)] mod integration_tests;
+#[cfg(test)] mod issue_815_admin_uninitialized_tests;
+#[cfg(test)] mod renewal_limit_tests;
 #[cfg(test)] mod cost_bench;
 // other test modules disabled during grace-period test restore
 #[cfg(test)] mod rate_limit_tests;
@@ -101,7 +103,7 @@ use storage::{
     add_token_to_whitelist, set_token_whitelist_enabled,
     mark_nonce_used, MAX_PAUSE_DURATION, nonce_used,
     read_admin, read_applied_migrations, read_audit_log, read_fee_discount,
-    read_migration_admin, write_migration_admin,
+    read_explicit_migration_admin, read_migration_admin, write_migration_admin,
     read_stream_transitions,
     read_governance, read_guardian, read_max_duration,
     read_max_future_start_offset, read_min_duration, read_pending_fee_proposal,
@@ -586,7 +588,7 @@ impl SoroStreamContract {
 
     /// Transfers the super-admin role to `new_admin`. Only the current admin may call this.
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         write_admin(&env, &new_admin);
         Ok(())
     }
@@ -936,7 +938,7 @@ impl SoroStreamContract {
     /// The pause expires automatically after `MAX_PAUSE_DURATION` seconds; see
     /// [`Self::is_paused`]. For the role-aware variant see `role_emergency_pause`.
     pub fn emergency_pause(env: Env) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         set_paused(&env, true);
         let ts = env.ledger().timestamp();
         set_pause_expiry(&env, ts.saturating_add(MAX_PAUSE_DURATION));
@@ -953,7 +955,7 @@ impl SoroStreamContract {
     ///
     /// For the role-aware variant see `role_emergency_resume`.
     pub fn emergency_resume(env: Env) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         set_paused(&env, false);
         set_pause_expiry(&env, 0);
         let admin = read_admin(&env).unwrap();
@@ -1019,7 +1021,7 @@ impl SoroStreamContract {
     /// Sets the guardian address that is allowed to pause the contract.
     /// Only the super-admin may call this.
     pub fn set_guardian(env: Env, guardian: Address) -> Result<(), StreamError> {
-        check_admin(&env); write_guardian(&env, &guardian); Ok(())
+        check_admin(&env)?; write_guardian(&env, &guardian); Ok(())
     }
 
     /// Returns the guardian address, or `None` if no guardian is configured.
@@ -1028,7 +1030,7 @@ impl SoroStreamContract {
     /// Sets the governance address that is allowed to unpause the contract.
     /// Only the super-admin may call this.
     pub fn set_governance(env: Env, governance: Address) -> Result<(), StreamError> {
-        check_admin(&env); write_governance(&env, &governance); Ok(())
+        check_admin(&env)?; write_governance(&env, &governance); Ok(())
     }
 
     /// Returns the governance address, or `None` if none is configured.
@@ -1069,12 +1071,12 @@ impl SoroStreamContract {
 
     /// Exempts `addr` from protocol fees. Only the super-admin may call this.
     pub fn add_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError> {
-        check_admin(&env); add_fee_exempt(&env, &addr); Ok(())
+        check_admin(&env)?; add_fee_exempt(&env, &addr); Ok(())
     }
 
     /// Removes the fee exemption for `addr`. Only the super-admin may call this.
     pub fn remove_fee_exempt(env: Env, addr: Address) -> Result<(), StreamError> {
-        check_admin(&env); remove_fee_exempt(&env, &addr); Ok(())
+        check_admin(&env)?; remove_fee_exempt(&env, &addr); Ok(())
     }
 
     /// Returns `true` when `addr` is exempt from protocol fees.
@@ -1087,7 +1089,7 @@ impl SoroStreamContract {
     ///
     /// Only the super-admin may call this. A no-op when nothing has been collected.
     pub fn sweep_fees(env: Env, token: Address, destination: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         let amount = drain_fees_collected(&env, &token);
         if amount > 0 {
             token::Client::new(&env, &token).transfer(&env.current_contract_address(), &destination, &amount);
@@ -1110,7 +1112,7 @@ impl SoroStreamContract {
     ///
     /// Individual senders may be given a different limit via `set_sender_stream_limit`.
     pub fn set_max_streams(env: Env, max_streams: u32) -> Result<(), StreamError> {
-        check_admin(&env); set_max_streams_per_sender(&env, max_streams); Ok(())
+        check_admin(&env)?; set_max_streams_per_sender(&env, max_streams); Ok(())
     }
 
     /// Overrides the concurrent stream limit for a single `sender`. Admin only.
@@ -1118,7 +1120,7 @@ impl SoroStreamContract {
     /// The override takes precedence over the protocol-wide default; a `limit` of `0`
     /// blocks `sender` from creating any further streams.
     pub fn set_sender_stream_limit(env: Env, sender: Address, limit: u32) -> Result<(), StreamError> {
-        check_admin(&env); set_sender_limit(&env, &sender, limit); Ok(())
+        check_admin(&env)?; set_sender_limit(&env, &sender, limit); Ok(())
     }
 
     // feat/37 — per-sender active stream cap
@@ -1129,7 +1131,7 @@ impl SoroStreamContract {
     /// current active stream count reaches this cap.  Setting to 0 disables
     /// the cap entirely (unlimited).  Admin only.
     pub fn set_sender_cap(env: Env, cap: u32) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         set_sender_stream_cap(&env, cap);
         Ok(())
     }
@@ -1159,7 +1161,7 @@ impl SoroStreamContract {
     }
 
     pub fn migrate(env: Env, from_version: String, to_version: String) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         let applied = read_applied_migrations(&env);
         if applied.contains(&to_version) { return Err(StreamError::MigrationAlreadyApplied); }
         write_version(&env, &to_version);
@@ -1255,7 +1257,8 @@ impl SoroStreamContract {
     ///
     /// Only the contract admin may change this value.  When no migration admin
     /// has been set explicitly, [`Self::migrate_storage`] defaults to checking
-    /// the contract admin.
+    /// the contract admin. Separation of duties only applies after a dedicated
+    /// migration admin is explicitly configured.
     ///
     /// # Errors
     /// - `NotInitialized` — contract has not been initialised.
@@ -1289,8 +1292,9 @@ impl SoroStreamContract {
     /// | 0 → 1     | Stamps the version key on legacy deployments.  No data transformation needed. |
     ///
     /// # Access control
-    /// Only the designated migration admin (or the contract admin if none is set)
-    /// may call this.
+    /// Only the designated migration admin (or, while none is configured, the
+    /// contract admin) may call this. A `MigrationAuthority` event identifies
+    /// which path authorized the call.
     ///
     /// # Errors
     /// - `NotInitialized` — contract has not been initialised.
@@ -1299,11 +1303,14 @@ impl SoroStreamContract {
     pub fn migrate_storage(env: Env, caller: Address) -> Result<(), StreamError> {
         caller.require_auth();
 
-        // Resolve migration admin (falls back to contract admin when unset).
+        // A fallback preserves legacy deployments, but only an explicitly
+        // configured role provides separation of duties.
+        let explicit_migration_admin = read_explicit_migration_admin(&env);
         let migration_admin = read_migration_admin(&env).ok_or(StreamError::NotInitialized)?;
         if caller != migration_admin {
             return Err(StreamError::NotAuthorized);
         }
+        events::migration_authority_used(&env, explicit_migration_admin.is_some());
 
         let current = storage::read_storage_version(&env).unwrap_or(0);
         if current >= CURRENT_STORAGE_VERSION {
@@ -3097,7 +3104,7 @@ impl SoroStreamContract {
 
     /// Sets the global withdrawal cooldown in seconds.
     pub fn set_withdrawal_cooldown(env: Env, admin: Address, cooldown_seconds: u64) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         set_withdrawal_cooldown(&env, cooldown_seconds);
         Ok(())
@@ -3106,7 +3113,7 @@ impl SoroStreamContract {
     /// Sets the global stream creation cooldown in seconds (Issue #239).
     /// Cooldown of 0 disables the mechanism (default).
     pub fn set_stream_creation_cooldown(env: Env, admin: Address, cooldown_seconds: u64) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         set_stream_creation_cooldown(&env, cooldown_seconds);
         Ok(())
@@ -3120,7 +3127,7 @@ impl SoroStreamContract {
         federation_name: String,
         stellar_address: Address,
     ) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         validation::require_bounded_string(&federation_name, validation::MAX_FEDERATION_NAME_BYTES)?;
         register_federation_address(&env, &federation_name, &stellar_address);
@@ -3135,7 +3142,7 @@ impl SoroStreamContract {
         admin: Address,
         federation_name: String,
     ) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         validation::require_bounded_string(&federation_name, validation::MAX_FEDERATION_NAME_BYTES)?;
         unregister_federation_address(&env, &federation_name);
@@ -3160,7 +3167,7 @@ impl SoroStreamContract {
     /// cannot expire while a sender is actively within it.
     /// Only the admin may call this.
     pub fn set_rate_limit_window(env: Env, admin: Address, window_ledgers: u32) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         set_rate_limit_window(&env, window_ledgers);
         events::rate_limit_updated(&env, window_ledgers as u64, get_rate_limit_max_creations(&env));
@@ -3171,7 +3178,7 @@ impl SoroStreamContract {
     ///
     /// Default: 20. Only the admin may call this.
     pub fn set_rate_limit_max(env: Env, admin: Address, max_creations: u32) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         set_rate_limit_max_creations(&env, max_creations);
         events::rate_limit_updated(&env, get_rate_limit_window(&env) as u64, max_creations);
@@ -3184,7 +3191,7 @@ impl SoroStreamContract {
     /// Intended for trusted integrators, relayers, or the admin itself.
     /// Only the admin may call this.
     pub fn add_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         add_rate_limit_exempt(&env, &address);
         Ok(())
@@ -3194,7 +3201,7 @@ impl SoroStreamContract {
     ///
     /// Only the admin may call this.
     pub fn remove_rate_limit_exempt(env: Env, admin: Address, address: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         remove_rate_limit_exempt(&env, &address);
         Ok(())
@@ -3212,7 +3219,7 @@ impl SoroStreamContract {
 
     /// Enables or disables recipient whitelisting.
     pub fn set_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         set_whitelist_enabled(&env, enabled);
         Ok(())
@@ -3221,7 +3228,7 @@ impl SoroStreamContract {
     /// Sets the expiry warning window in ledgers. Admin only.
     /// Default: 17280 (~24 h at 5 s/ledger). Must be > 0.
     pub fn set_expiry_warning_window(env: Env, window_ledgers: u32) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         if window_ledgers == 0 { return Err(StreamError::InvalidExpiryWindow); }
         set_expiry_warning_window(&env, window_ledgers);
         Ok(())
@@ -3235,14 +3242,14 @@ impl SoroStreamContract {
 
     /// Sets the new-sender stream cap (max concurrent streams before promotion). Admin only.
     pub fn set_new_sender_stream_cap(env: Env, cap: u32) -> Result<(), StreamError> {
-        check_admin(&env); set_new_sender_stream_cap(&env, cap); Ok(())
+        check_admin(&env)?; set_new_sender_stream_cap(&env, cap); Ok(())
     }
     /// Returns the concurrent stream cap applied to senders that are not yet promoted.
     pub fn get_new_sender_stream_cap(env: Env) -> u32 { get_new_sender_stream_cap(&env) }
 
     /// Sets the promotion threshold (lifetime stream count). Admin only.
     pub fn set_sender_promotion_threshold(env: Env, threshold: u32) -> Result<(), StreamError> {
-        check_admin(&env); set_sender_promotion_threshold(&env, threshold); Ok(())
+        check_admin(&env)?; set_sender_promotion_threshold(&env, threshold); Ok(())
     }
     /// Returns the lifetime stream count at which a sender is promoted.
     pub fn get_sender_promotion_threshold(env: Env) -> u32 { get_sender_promotion_threshold(&env) }
@@ -3296,7 +3303,7 @@ impl SoroStreamContract {
     /// The allowlist is mandatory because token transfers are external calls.
     /// Disabling enforcement is rejected.
     pub fn set_token_whitelist_enabled(env: Env, admin: Address, enabled: bool) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         if !enabled {
             return Err(StreamError::NotAuthorized);
@@ -3308,7 +3315,7 @@ impl SoroStreamContract {
 
     /// Adds a token to the mandatory whitelist (Issue #221).
     pub fn add_token_to_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         add_token_to_whitelist(&env, &token);
         events::token_whitelisted(&env, &token);
@@ -3317,7 +3324,7 @@ impl SoroStreamContract {
 
     /// Removes a token from the whitelist (Issue #221).
     pub fn remove_token_from_whitelist(env: Env, admin: Address, token: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         admin.require_auth();
         remove_token_from_whitelist(&env, &token);
         events::token_dwhitelisted(&env, &token);
@@ -3328,7 +3335,7 @@ impl SoroStreamContract {
 
     /// Sets the per-token stream cap. Setting to 0 disables the cap. Admin only.
     pub fn set_max_streams_per_token(env: Env, max: u32) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         set_max_streams_per_token(&env, max);
         Ok(())
     }
@@ -3346,7 +3353,7 @@ impl SoroStreamContract {
     /// This provides risk management by preventing users from locking unbounded
     /// amounts of a particular asset in a single stream.
     pub fn set_max_deposit_per_token(env: Env, token: Address, max_deposit: i128) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         if max_deposit < 0 {
             return Err(StreamError::ZeroAmount);
         }
@@ -3364,7 +3371,7 @@ impl SoroStreamContract {
 
     /// Adds an address to the blocklist. Admin only.
     pub fn add_to_blocklist(env: Env, addr: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         add_to_blocklist(&env, &addr);
         events::address_blocked(&env, &read_admin(&env).unwrap(), &addr);
         Ok(())
@@ -3372,7 +3379,7 @@ impl SoroStreamContract {
 
     /// Removes an address from the blocklist. Admin only.
     pub fn remove_from_blocklist(env: Env, addr: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         remove_from_blocklist(&env, &addr);
         events::address_unblocked(&env, &read_admin(&env).unwrap(), &addr);
         Ok(())
@@ -3387,7 +3394,7 @@ impl SoroStreamContract {
 
     /// Sets the grace period in ledgers. Zero means no grace period. Admin only.
     pub fn set_grace_period_ledgers(env: Env, ledgers: u32) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         set_grace_period_ledgers(&env, ledgers);
         Ok(())
     }
@@ -3764,7 +3771,7 @@ impl SoroStreamContract {
 
     /// Sets the flat XLM creation fee (in stroops) and the XLM SAC token address.
     pub fn set_creation_fee(env: Env, fee: i128, xlm_token: Address) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         if fee < 0 {
             return Err(StreamError::ZeroAmount);
         }
@@ -8285,7 +8292,7 @@ impl SoroStreamContract {
         amount: i128,
         destination: Address,
     ) -> Result<(), StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
         env.invoke_contract::<()>(
             &treasury,
@@ -8301,7 +8308,7 @@ impl SoroStreamContract {
         token: Address,
         destination: Address,
     ) -> Result<i128, StreamError> {
-        check_admin(&env);
+        check_admin(&env)?;
         let treasury = get_treasury(&env).ok_or(StreamError::NotInitialized)?;
         let result = env.invoke_contract::<i128>(
             &treasury,
@@ -8451,7 +8458,7 @@ impl SoroStreamContract {
 
     /// Recalibrates the active stream count by scanning all streams.
     /// Only callable by admin. Use when counter drift is suspected.
-    pub fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError> {        check_admin(&env);
+    pub fn recalibrate_stats(env: Env, admin: Address) -> Result<(), StreamError> {        check_admin(&env)?;
         admin.require_auth();
 
         let mut correct_count = 0u32;

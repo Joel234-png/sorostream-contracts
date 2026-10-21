@@ -564,3 +564,54 @@ impl MultiSigContract {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
+
+    fn setup() -> (Env, Address, Vec<Address>) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(MultiSigContract, ());
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let owner3 = Address::generate(&env);
+        let owners = vec![&env, owner1.clone(), owner2.clone(), owner3.clone()];
+        let c = MultiSigContractClient::new(&env, &contract_id);
+        assert!(c.initialize(&owners, &2u32).is_ok());
+        (env, contract_id, vec![owner1, owner2, owner3])
+    }
+
+    #[test]
+    fn test_approve_after_expiry_rejected_with_prior_approvals() {
+        let (env, contract_id, owners) = setup();
+        let c = MultiSigContractClient::new(&env, &contract_id);
+        let owner1 = owners[0].clone();
+        let owner2 = owners[1].clone();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "dummy");
+        let calldata = Bytes::new(&env);
+
+        env.ledger().set_timestamp(1000);
+        let intent_id = c
+            .propose(&owner1, &target, &function, &calldata, &2000u64)
+            .unwrap();
+
+        // owner1 approves before the expiry
+        assert!(c.approve(&owner1, &intent_id).unwrap());
+
+        // advance time past the intent's expiry
+        env.ledger().set_timestamp(3000);
+
+        // owner2 attempts to approve after expiry: must be rejected even though
+        // the threshold has not been reached and a prior approval exists.
+        let result = c.try_approve(&owner2, &intent_id);
+        assert_eq!(result, Err(Ok(MultiSigError::IntentExpired)));
+
+        // the intent is still pending with only the single prior approval
+        let intent = c.get_intent(&intent_id).unwrap();
+        assert_eq!(intent.status, IntentStatus::Pending);
+        assert_eq!(intent.approval_count, 1);
+    }
+}

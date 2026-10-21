@@ -24,6 +24,19 @@ fn upload_child_wasm(env: &Env) -> BytesN<32> {
     env.deployer().upload_contract_wasm(CHILD_WASM)
 }
 
+fn has_event(env: &Env, name: &str) -> bool {
+    env.events().all().iter().any(|(_, topics, _)| {
+        let topics: Vec<Val> = topics.clone();
+        topics
+            .get(0)
+            .map(|topic| {
+                let topic: Symbol = topic.into_val(env);
+                topic == Symbol::new(env, name)
+            })
+            .unwrap_or(false)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests — init and auth only (no WASM required)
 // ---------------------------------------------------------------------------
@@ -239,10 +252,11 @@ fn test_deploy_records_metadata_and_registry() {
         .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1), &None::<String>);
 
     // Registry has one entry.
-    let contracts = c.get_deployed_contracts();
+    let contracts = c.get_deployed_contracts(&0, &20);
     assert_eq!(contracts.len(), 1);
     assert_eq!(c.get_deployed_contract_count(), 1);
     assert_eq!(contracts.get(0).unwrap(), child_addr);
+    assert!(has_event(&env, "StreamContractDeployed"));
 
     // Metadata is correct.
     let info = c.get_deployment_info(&child_addr).unwrap();

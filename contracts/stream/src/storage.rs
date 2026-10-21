@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use crate::types::{AuditEntry, Stream, StreamTransition, VestingTranche, WithdrawalRecord};
-use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec, xdr::ToXdr};
+use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec, xdr::ToXdr};
 
 const ADMIN_KEY: Symbol = symbol_short!("admin");
 const PAUSED_KEY: Symbol = symbol_short!("paused");
@@ -239,6 +239,23 @@ pub fn save_stream(env: &Env, stream: &Stream) {
 /// Loads a stream from storage. Returns None if not found.
 pub fn load_stream(env: &Env, stream_id: u64) -> Option<Stream> {
     env.storage().persistent().get(&stream_id)
+}
+
+/// Loads the public stream view without converting the legacy inline metadata
+/// blob. Current metadata blobs are stored separately in temporary storage.
+pub fn load_stream_view(env: &Env, stream_id: u64) -> Option<Stream> {
+    let mut fields: Vec<Val> = env.storage().persistent().get(&stream_id)?;
+    let options_value = fields.get(14)?;
+    let mut options_fields = Vec::<Val>::try_from_val(env, &options_value).ok()?;
+    options_fields.set(6, Bytes::new(env).into_val(env));
+    fields.set(14, options_fields.into_val(env));
+    Stream::try_from_val(env, &fields).ok()
+}
+
+/// Returns the encoded stored-value size, including any legacy inline metadata.
+pub fn stream_entry_value_size(env: &Env, stream_id: u64) -> Option<u32> {
+    let value: Val = env.storage().persistent().get(&stream_id)?;
+    Some(value.to_xdr(env).len())
 }
 
 /// Removes a stream from storage.
@@ -988,7 +1005,13 @@ pub fn effective_sender_limit(env: &Env, sender: &Address) -> u32 {
     get_sender_limit(env, sender).unwrap_or_else(|| get_max_streams_per_sender(env))
 }
 
-// --- Audit log helpers (circular buffer, capacity = 20) ---
+// --- Audit log helpers (bounded circular buffer, capacity = 20) ---
+//
+// The audit log is deliberately bounded and is NOT subject to the unbounded
+// growth pattern previously fixed for the sender/recipient indexes (issues #6/#7/#8).
+// Entries are stored in a fixed-size ring buffer of `AUDIT_CAP` slots; once full,
+// new entries overwrite the oldest. Total stored entries never exceed `AUDIT_CAP`,
+// so storage growth is constant regardless of the number of admin actions.
 
 const AUDIT_HEAD_KEY: Symbol = symbol_short!("al_head");
 const AUDIT_LEN_KEY: Symbol = symbol_short!("al_len");
@@ -998,7 +1021,10 @@ fn audit_slot_key(env: &Env, idx: u32) -> (Symbol, u32) {
     (symbol_short!("al"), idx)
 }
 
-/// Appends an audit entry to the circular buffer.
+/// Appends an audit entry to the bounded circular buffer.
+///
+/// Overwrites the oldest entry once the buffer is full, so the log never grows
+/// beyond `AUDIT_CAP` entries (see module doc above).
 pub fn append_audit_entry(env: &Env, entry: &AuditEntry) {
     let head: u32 = env.storage().instance().get(&AUDIT_HEAD_KEY).unwrap_or(0u32);
     let len: u32 = env.storage().instance().get(&AUDIT_LEN_KEY).unwrap_or(0u32);

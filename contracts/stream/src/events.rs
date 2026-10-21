@@ -1267,6 +1267,20 @@ pub fn role_revoked(env: &Env, role_name: &String, admin: &Address) {
     );
 }
 
+/// Emitted when the super-admin atomically transfers a role between addresses.
+pub fn role_transferred(
+    env: &Env,
+    role_name: &String,
+    old_holder: &Address,
+    new_holder: &Address,
+    admin: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "RoleTransferred"),),
+        (role_name.clone(), old_holder.clone(), new_holder.clone(), admin.clone()),
+    );
+}
+
 // ── Issue #293: Sender collateral / stake events ─────────────────────────────
 
 /// Emitted when a sender deposits stake collateral.

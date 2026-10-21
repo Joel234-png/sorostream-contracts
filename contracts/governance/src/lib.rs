@@ -48,6 +48,8 @@ pub enum ProposalStatus {
     Executed,
     /// Vetoed by the guardian during the timelock.
     Vetoed,
+    /// Execution was attempted but the target invocation failed; retryable via `execute`.
+    Failed,
 }
 
 #[contracttype]
@@ -90,6 +92,7 @@ pub enum GovernanceError {
     ProposalNotQueued = 10,
     InsufficientTokens = 11,
     InvalidParam = 12,
+    InvokeFailed = 13,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -356,7 +359,9 @@ impl GovernanceContract {
         let mut proposal = load_proposal(&env, proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Queued {
+        if proposal.status != ProposalStatus::Queued
+            && proposal.status != ProposalStatus::Failed
+        {
             return Err(GovernanceError::ProposalNotQueued);
         }
 
@@ -365,21 +370,36 @@ impl GovernanceContract {
             return Err(GovernanceError::TimelockNotExpired);
         }
 
-        proposal.status = ProposalStatus::Executed;
-        save_proposal(&env, &proposal);
-
-        env.invoke_contract::<()>(
+        let invoke_result = env.try_invoke_contract::<()>(
             &proposal.target,
             &proposal.function,
             Vec::from_array(&env, [soroban_sdk::IntoVal::into_val(&proposal.calldata, &env)]),
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "ProposalExecuted"), proposal_id),
-            (),
-        );
+        match invoke_result {
+            Ok(()) => {
+                proposal.status = ProposalStatus::Executed;
+                save_proposal(&env, &proposal);
 
-        Ok(())
+                env.events().publish(
+                    (Symbol::new(&env, "ProposalExecuted"), proposal_id),
+                    (),
+                );
+
+                Ok(())
+            }
+            Err(_) => {
+                proposal.status = ProposalStatus::Failed;
+                save_proposal(&env, &proposal);
+
+                env.events().publish(
+                    (Symbol::new(&env, "ProposalFailed"), proposal_id),
+                    (),
+                );
+
+                Err(GovernanceError::InvokeFailed)
+            }
+        }
     }
 
     /// Vetoes a queued proposal. Only the guardian may call this.

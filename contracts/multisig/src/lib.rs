@@ -8,7 +8,8 @@
 //! 2. Each owner calls `approve(intent_id)` with their auth. The SDK's `require_auth`
 //!    enforces that the caller is who they claim to be.
 //! 3. When M approvals are collected the operation executes automatically.
-//! 4. Any owner can `cancel` an intent before it reaches the threshold.
+//! 4. The intent's proposer can `cancel` it before it reaches the threshold.
+//!    Other owners cannot unilaterally cancel an intent they did not propose.
 //!
 //! ## Owner management
 //! `add_owner`, `remove_owner`, and `change_threshold` are themselves guarded: callers
@@ -79,6 +80,7 @@ pub enum MultiSigError {
     OwnerNotFound = 10,
     ThresholdExceedsOwners = 11,
     DuplicateOwner = 12,
+    NotProposer = 13,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -370,7 +372,9 @@ impl MultiSigContract {
         }
     }
 
-    /// Cancels a pending intent. Any owner may cancel.
+    /// Cancels a pending intent. Only the original proposer may cancel;
+    /// other owners must not be able to unilaterally kill an intent they
+    /// did not propose (e.g. one already backed by several approvals).
     pub fn cancel(
         env: Env,
         owner: Address,
@@ -386,6 +390,10 @@ impl MultiSigContract {
 
         if intent.status != IntentStatus::Pending {
             return Err(MultiSigError::IntentNotPending);
+        }
+
+        if owner != intent.proposer {
+            return Err(MultiSigError::NotProposer);
         }
 
         intent.status = IntentStatus::Cancelled;

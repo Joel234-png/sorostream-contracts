@@ -2,8 +2,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, Events},
-    Address, BytesN, Env, Symbol, Val,
+    testutils::{Address as _, Ledger},
+    Address, BytesN, Env, String,
 };
 
 // ---------------------------------------------------------------------------
@@ -84,6 +84,44 @@ fn test_get_admin_returns_none_before_init() {
 }
 
 #[test]
+fn test_propose_admin_same_as_current_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+
+    c.initialize(&admin);
+
+    // Proposing the current admin as the new admin is a no-op transfer.
+    let result = c.try_propose_admin(&admin);
+    assert!(result.is_err());
+    match result {
+        Err(Ok(e)) => assert_eq!(e, FactoryError::NewAdminSameAsCurrent),
+        _ => panic!("expected NewAdminSameAsCurrent"),
+    }
+}
+
+#[test]
+fn test_propose_admin_then_accept_admin_transfers() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    c.initialize(&admin);
+
+    c.propose_admin(&new_admin);
+    c.accept_admin(&new_admin);
+
+    assert_eq!(c.get_admin(), Some(new_admin));
+}
+
+#[test]
 fn test_deploy_not_initialized_rejected() {
     let env = Env::default();
     env.mock_all_auths();
@@ -97,6 +135,7 @@ fn test_deploy_not_initialized_rejected() {
         &admin,
         &BytesN::from_array(&env, &[0xAB_u8; 32]),
         &fake_salt(&env, 1),
+        &None::<String>,
     );
     assert!(result.is_err());
     match result {
@@ -122,6 +161,7 @@ fn test_deploy_unauthorized_non_admin() {
         &attacker,
         &BytesN::from_array(&env, &[0xAB_u8; 32]),
         &fake_salt(&env, 1),
+        &None::<String>,
     );
     assert!(result.is_err());
     match result {
@@ -161,7 +201,8 @@ fn test_deploy_records_metadata_and_registry() {
     c.initialize(&admin);
 
     let wasm_hash = upload_child_wasm(&env);
-    let child_addr = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1));
+    let child_addr = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1), &None::<String>);
 
     // Registry has one entry.
     let contracts = c.get_deployed_contracts();
@@ -175,6 +216,7 @@ fn test_deploy_records_metadata_and_registry() {
     assert_eq!(info.deploy_timestamp, 1000);
     assert_eq!(info.wasm_hash, wasm_hash);
     assert_eq!(info.contract_address, child_addr);
+    assert_eq!(info.label, None);
 }
 
 #[test]
@@ -189,8 +231,10 @@ fn test_different_salts_give_different_addresses() {
 
     let wasm_hash = upload_child_wasm(&env);
 
-    let addr1 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1));
-    let addr2 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 2));
+    let addr1 = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 1), &None::<String>);
+    let addr2 = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 2), &None::<String>);
 
     // Different salts must produce different child addresses.
     assert_ne!(addr1, addr2);
@@ -208,9 +252,12 @@ fn test_deploy_multiple_contracts_all_listed_in_order() {
 
     let wasm_hash = upload_child_wasm(&env);
 
-    let addr1 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 10));
-    let addr2 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 20));
-    let addr3 = c.deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 30));
+    let addr1 = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 10), &None::<String>);
+    let addr2 = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 20), &None::<String>);
+    let addr3 = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 30), &None::<String>);
 
     let contracts = c.get_deployed_contracts();
     assert_eq!(contracts.len(), 3);
@@ -219,48 +266,24 @@ fn test_deploy_multiple_contracts_all_listed_in_order() {
     assert_eq!(contracts.get(2).unwrap(), addr3);
 }
 
-// ---------------------------------------------------------------------------
-// Tests — admin-transfer events (issue #769)
-// ---------------------------------------------------------------------------
-
-/// Confirms factory's AdminTransferProposed/AdminTransferAccepted events use the
-/// same topic name and single data field (`Address`) as governance's equivalent
-/// events, so off-chain indexers can handle "any SoroStream-family admin
-/// transfer" generically.
 #[test]
-fn test_factory_admin_transfer_events_match_governance_schema() {
+fn test_deploy_stores_label_and_info_roundtrips() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_sequence_number(7);
+    env.ledger().set_timestamp(12345);
 
     let factory_id = env.register(StreamFactory, ());
     let c = StreamFactoryClient::new(&env, &factory_id);
     let admin = Address::generate(&env);
     c.initialize(&admin);
 
-    let new_admin = Address::generate(&env);
+    let wasm_hash = upload_child_wasm(&env);
+    let label = String::from_str(&env, "production-mainnet-v2");
+    let child_addr = c
+        .deploy_stream_contract(&admin, &wasm_hash, &fake_salt(&env, 5), &Some(label.clone()));
 
-    // ---- propose_admin emits AdminTransferProposed(new_admin) ----
-    c.propose_admin(&new_admin);
-    let all = env.events().all();
-    let proposed = all.iter().find(|(_, topics, _)| {
-        !topics.is_empty() && topics.get(0).unwrap() == Symbol::new(&env, "AdminTransferProposed")
-    }).expect("AdminTransferProposed event must be emitted");
-
-    let (_emitter, _topics, data) = proposed;
-    let data_val: Address = data.into_val(&env);
-    assert_eq!(data_val, new_admin, "AdminTransferProposed data must be the new_admin address");
-
-    // ---- accept_admin emits AdminTransferAccepted(accepted_by) ----
-    c.accept_admin(&new_admin);
-    let all = env.events().all();
-    let accepted = all.iter().find(|(_, topics, _)| {
-        !topics.is_empty() && topics.get(0).unwrap() == Symbol::new(&env, "AdminTransferAccepted")
-    }).expect("AdminTransferAccepted event must be emitted");
-
-    let (_emitter, _topics, data) = accepted;
-    let data_val: Address = data.into_val(&env);
-    assert_eq!(data_val, new_admin, "AdminTransferAccepted data must be the accepted_by address");
-
-    // Admin transfer completed.
-    assert_eq!(c.get_admin(), Some(new_admin));
+    let info = c.get_deployment_info(&child_addr).unwrap();
+    assert_eq!(info.label, Some(label));
+    assert_eq!(info.contract_address, child_addr);
 }

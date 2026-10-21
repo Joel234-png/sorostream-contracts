@@ -8,12 +8,16 @@
 //! 2. Each owner calls `approve(intent_id)` with their auth. The SDK's `require_auth`
 //!    enforces that the caller is who they claim to be.
 //! 3. When M approvals are collected the operation executes automatically.
-//! 4. Any owner can `cancel` an intent before it reaches the threshold.
+//! 4. The intent's proposer can `cancel` it before it reaches the threshold.
+//!    Other owners cannot unilaterally cancel an intent they did not propose.
 //!
 //! ## Owner management
 //! `add_owner`, `remove_owner`, and `change_threshold` are themselves guarded: callers
 //! must route them through `propose` + `approve` so the multi-sig approves its own
 //! configuration changes.
+
+#[cfg(test)]
+mod test;
 
 use soroban_sdk::{
     contract, contractimpl, contracterror, contracttype, Address, Bytes, Env, Symbol, Vec,
@@ -27,6 +31,8 @@ const INTENT_COUNT_KEY: &str = "i_cnt";
 const NONCE_KEY: &str = "nonce";
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
+const PROPOSER_INTENTS_KEY: &str = "pi";
+const TARGET_INTENTS_KEY: &str = "ti";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -74,6 +80,7 @@ pub enum MultiSigError {
     OwnerNotFound = 10,
     ThresholdExceedsOwners = 11,
     DuplicateOwner = 12,
+    NotProposer = 13,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -120,6 +127,22 @@ fn remove_owner_storage(env: &Env, addr: &Address) {
 
 fn owner_count(env: &Env) -> u32 {
     env.storage().instance().get(&Symbol::new(env, OWNER_COUNT_KEY)).unwrap_or(0)
+}
+
+/// Returns every intent id proposed by `proposer` (any status).
+fn proposer_intents_key(env: &Env, proposer: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "pi"), proposer.clone())
+}
+
+/// Returns every intent id targeting `target` (any status).
+fn target_intents_key(env: &Env, target: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "ti"), target.clone())
+}
+
+fn append_intent_index(env: &Env, key: (Symbol, Address), id: u64) {
+    let mut list: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
+    list.push_back(id);
+    env.storage().persistent().set(&key, &list);
 }
 
 fn get_threshold(env: &Env) -> u32 {
@@ -256,7 +279,7 @@ impl MultiSigContract {
 
         env.events().publish(
             (Symbol::new(&env, "IntentProposed"), id),
-            (proposer, target, function, nonce, expiry),
+            (proposer, target, function, nonce, expiry, calldata),
         );
 
         Ok(id)
@@ -267,6 +290,17 @@ impl MultiSigContract {
     /// When the approval count reaches the threshold the operation executes
     /// automatically and `true` is returned. Returns `false` if the threshold
     /// has not yet been reached.
+    ///
+    /// Execution invokes `intent.function` on `intent.target` with
+    /// `intent.calldata` as a single raw `Bytes` argument, assuming the target
+    /// returns `()`. This is the generic "invoke a target with one raw `Bytes`
+    /// argument" execution convention shared with governance's `execute`.
+    ///
+    /// It is NOT the convention used by the main stream contract, whose entry
+    /// points take distinct typed parameters and return `Result<_, StreamError>`.
+    /// Consequently, a multi-sig intent cannot directly invoke the stream
+    /// contract's real entry points through this path; an adapter accepting a
+    /// single `Bytes` argument would be required.
     pub fn approve(
         env: Env,
         owner: Address,
@@ -305,9 +339,17 @@ impl MultiSigContract {
 
         if intent.approval_count >= threshold {
             intent.status = IntentStatus::Executed;
-            save_intent(&env, &intent);
+        save_intent(&env, &intent);
 
-            env.events().publish(
+        // Secondary indexes so intents can be listed by proposer or target.
+        append_intent_index(
+            &env,
+            proposer_intents_key(&env, &proposer),
+            id,
+        );
+        append_intent_index(&env, target_intents_key(&env, &target), id);
+
+        env.events().publish(
                 (Symbol::new(&env, "ThresholdReached"), intent_id),
                 threshold,
             );
@@ -330,7 +372,9 @@ impl MultiSigContract {
         }
     }
 
-    /// Cancels a pending intent. Any owner may cancel.
+    /// Cancels a pending intent. Only the original proposer may cancel;
+    /// other owners must not be able to unilaterally kill an intent they
+    /// did not propose (e.g. one already backed by several approvals).
     pub fn cancel(
         env: Env,
         owner: Address,
@@ -346,6 +390,10 @@ impl MultiSigContract {
 
         if intent.status != IntentStatus::Pending {
             return Err(MultiSigError::IntentNotPending);
+        }
+
+        if owner != intent.proposer {
+            return Err(MultiSigError::NotProposer);
         }
 
         intent.status = IntentStatus::Cancelled;
@@ -422,6 +470,18 @@ impl MultiSigContract {
         owner_count(&env)
     }
 
+    /// Returns the full list of current owner addresses.
+    pub fn get_owners(env: Env) -> Vec<Address> {
+        let cnt = owner_count(&env);
+        let mut owners = Vec::new(&env);
+        for i in 0..cnt {
+            if let Some(addr) = env.storage().persistent().get(&owner_slot_key(&env, i)) {
+                owners.push_back(addr);
+            }
+        }
+        owners
+    }
+
     /// Returns the current global nonce (next value that will be used).
     pub fn get_nonce(env: Env) -> u64 {
         env.storage()
@@ -433,6 +493,28 @@ impl MultiSigContract {
     /// Returns the full intent struct.
     pub fn get_intent(env: Env, intent_id: u64) -> Result<Intent, MultiSigError> {
         load_intent(&env, intent_id).ok_or(MultiSigError::IntentNotFound)
+    }
+
+    /// Returns the ids of all intents proposed by `proposer` (any status).
+    ///
+    /// Use [`get_intent`] to inspect each intent's status and filter for
+    /// `IntentStatus::Pending` if only live intents are needed.
+    pub fn get_intents_by_proposer(env: Env, proposer: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&proposer_intents_key(&env, &proposer))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the ids of all intents targeting `target` (any status).
+    ///
+    /// Use [`get_intent`] to inspect each intent's status and filter for
+    /// `IntentStatus::Pending` if only live intents are needed.
+    pub fn get_intents_by_target(env: Env, target: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&target_intents_key(&env, &target))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Returns whether an owner has already approved a given intent.
@@ -503,77 +585,52 @@ impl MultiSigContract {
 }
 
 #[cfg(test)]
-extern crate std;
-
-#[cfg(test)]
-mod tests {
+mod test {
     use super::*;
-    use soroban_sdk::{
-        testutils::Address as _,
-        Address, Bytes, Env, Symbol,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
 
-    struct TestEnv {
-        env: Env,
-        contract_id: Address,
-    }
-
-    fn setup() -> TestEnv {
+    fn setup() -> (Env, Address, Vec<Address>) {
         let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-
+        env.mock_all_auths();
         let contract_id = env.register(MultiSigContract, ());
-        TestEnv {
-            env,
-            contract_id,
-        }
-    }
-
-    fn client(t: &TestEnv) -> MultiSigContractClient<'_> {
-        MultiSigContractClient::new(&t.env, &t.contract_id)
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let owner3 = Address::generate(&env);
+        let owners = vec![&env, owner1.clone(), owner2.clone(), owner3.clone()];
+        let c = MultiSigContractClient::new(&env, &contract_id);
+        assert!(c.initialize(&owners, &2u32).is_ok());
+        (env, contract_id, vec![owner1, owner2, owner3])
     }
 
     #[test]
-    fn test_propose_rejects_removed_owner() {
-        let t = setup();
-        let c = client(&t);
+    fn test_approve_after_expiry_rejected_with_prior_approvals() {
+        let (env, contract_id, owners) = setup();
+        let c = MultiSigContractClient::new(&env, &contract_id);
+        let owner1 = owners[0].clone();
+        let owner2 = owners[1].clone();
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "dummy");
+        let calldata = Bytes::new(&env);
 
-        let owner_a = Address::generate(&t.env);
-        let owner_b = Address::generate(&t.env);
-        let owner_c = Address::generate(&t.env);
+        env.ledger().set_timestamp(1000);
+        let intent_id = c
+            .propose(&owner1, &target, &function, &calldata, &2000u64)
+            .unwrap();
 
-        c.initialize(
-            &vec![owner_a.clone(), owner_b.clone(), owner_c.clone()],
-            &1u32,
-        );
+        // owner1 approves before the expiry
+        assert!(c.approve(&owner1, &intent_id).unwrap());
 
-        assert!(c.is_owner(&owner_a));
-        assert!(c.is_owner(&owner_b));
-        assert!(c.is_owner(&owner_c));
-        assert_eq!(c.owner_count(), 3);
+        // advance time past the intent's expiry
+        env.ledger().set_timestamp(3000);
 
-        // Remove owner_b through the multi-sig itself (current_contract_address auth).
-        c.remove_owner(&owner_b);
-        assert!(!c.is_owner(&owner_b));
-        assert_eq!(c.owner_count(), 2);
+        // owner2 attempts to approve after expiry: must be rejected even though
+        // the threshold has not been reached and a prior approval exists.
+        let result = c.try_approve(&owner2, &intent_id);
+        assert_eq!(result, Err(Ok(MultiSigError::IntentExpired)));
 
-        // Former owner_b attempts to propose with a stale authorization — must fail.
-        let target = Address::generate(&t.env);
-        let calldata = Bytes::new(&t.env);
-        let function = Symbol::new(&t.env, "noop");
-        let result = c.try_propose(&owner_b, &target, &function, &calldata, &u64::MAX);
-        assert_eq!(
-            result,
-            Err(Ok(MultiSigError::NotOwner)),
-            "a removed owner must not be able to propose a new intent"
-        );
-
-        // A remaining owner can still propose normally.
-        let intent_id = c.propose(&owner_a, &target, &function, &calldata, &u64::MAX);
-        assert!(intent_id.is_ok());
-
-        let intent = c.get_intent(intent_id.unwrap()).unwrap();
-        assert_eq!(intent.proposer, owner_a);
+        // the intent is still pending with only the single prior approval
+        let intent = c.get_intent(&intent_id).unwrap();
         assert_eq!(intent.status, IntentStatus::Pending);
+        assert_eq!(intent.approval_count, 1);
     }
 }

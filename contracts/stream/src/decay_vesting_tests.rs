@@ -60,6 +60,39 @@ fn test_decay_factor_zero_equals_linear() {
 }
 
 #[test]
+fn test_decay_boundary_df0_equals_df1_continuous() {
+    // As decay_factor approaches 0 from the iterative side (df=1, 2, 5), the
+    // fixed-point path must produce results continuous with the linear fallback
+    // (df=0).  df=1 bps per 1 ks window = 0.01% per window, so over a 10 ks
+    // stream the drift vs linear is tiny — results should match within a few
+    // stroops, confirming no discontinuity at the df==0 early-return boundary.
+
+    let deposit = 1_000_000i128;
+    let start = 0u64;
+    let end = 10_000u64;
+    let duration = (end - start) as i128;
+
+    for elapsed in [1000u64, 2500, 5000, 7500, 9999, 10_000] {
+        let query = start + elapsed;
+
+        // Linear fallback path (df == 0).
+        let linear = compute_cumulative_decay(deposit, start, end, query, 0).unwrap();
+
+        // Iterative fixed-point path with tiny decay factors (df >= 1).
+        for &df in &[1u32, 2, 5] {
+            let iterative = compute_cumulative_decay(deposit, start, end, query, df).unwrap();
+            let diff = (iterative - linear).abs();
+            // tolerance scales with elapsed fraction; df=1 bps/window is ~0.01%
+            // decay per window, so drift vs linear is well under 1 stroop here.
+            assert!(
+                diff <= 2,
+                "df={df} not continuous with df=0 at elapsed={elapsed}: linear={linear}, iterative={iterative}, diff={diff}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_decay_claimable_always_gte_linear() {
     // For any decay_factor > 0 the front-weighting means that by any given
     // moment the cumulative decay-vested amount is ≥ the linearly-vested amount.

@@ -91,3 +91,43 @@ fn test_roles_can_be_assigned_and_revoked_by_super_admin() {
     c.set_token_admin(&t.super_admin, &new_token_admin);
     assert_eq!(c.get_token_admin(), Some(new_token_admin));
 }
+
+#[test]
+fn test_roles_transfer_atomically_and_require_expected_current_holder() {
+    let t = setup();
+    let c = client(&t);
+    let new_fee_manager = Address::generate(&t.env);
+    let new_emergency_admin = Address::generate(&t.env);
+    let new_token_admin = Address::generate(&t.env);
+    let analytics_holder = Address::generate(&t.env);
+    let new_analytics_admin = Address::generate(&t.env);
+    c.assign_analytics_role(&t.super_admin, &analytics_holder);
+
+    let wrong_old_holder = Address::generate(&t.env);
+    assert_eq!(
+        c.try_transfer_fee_manager_role(&t.super_admin, &wrong_old_holder, &new_fee_manager),
+        Err(Ok(StreamError::NotAuthorized))
+    );
+    assert_eq!(c.get_fee_admin(), Some(t.fee_admin.clone()));
+
+    c.transfer_fee_manager_role(&t.super_admin, &t.fee_admin, &new_fee_manager);
+    let events = t.env.events().all();
+    let transfer_events: std::vec::Vec<_> = events
+        .iter()
+        .filter(|(_, topics, _)| {
+            !topics.is_empty()
+                && soroban_sdk::Symbol::new(&t.env, "RoleTransferred")
+                    == topics.get(0).unwrap().into_val(&t.env)
+        })
+        .collect();
+    assert_eq!(transfer_events.len(), 1);
+
+    c.transfer_emergency_pause_role(&t.super_admin, &t.emergency_admin, &new_emergency_admin);
+    c.transfer_token_admin_role(&t.super_admin, &t.token_admin, &new_token_admin);
+    c.transfer_analytics_role(&t.super_admin, &analytics_holder, &new_analytics_admin);
+
+    assert_eq!(c.get_fee_admin(), Some(new_fee_manager));
+    assert_eq!(c.get_emergency_admin(), Some(new_emergency_admin));
+    assert_eq!(c.get_token_admin(), Some(new_token_admin));
+    assert_eq!(c.get_analytics_role(), Some(new_analytics_admin));
+}

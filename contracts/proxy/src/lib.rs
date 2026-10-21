@@ -35,6 +35,7 @@ pub enum ProxyError {
     NotAdmin = 3,
     StorageVersionMismatch = 4,
     MigrationAlreadyApplied = 5,
+    MigrationFailed = 6,
 }
 
 fn read_admin(env: &Env) -> Option<Address> {
@@ -146,6 +147,16 @@ impl ProxyContract {
         read_storage_version(&env)
     }
 
+    /// Returns the current implementation WASM hash and storage layout version
+    /// in a single call, so callers observe the implementation+version pairing
+    /// consistently (both are read together, as `upgrade()` writes them together).
+    pub fn get_impl_storage_info(env: Env) -> Result<(BytesN<32>, u32), ProxyError> {
+        Ok((
+            read_impl_hash(&env).ok_or(ProxyError::NotInitialized)?,
+            read_storage_version(&env),
+        ))
+    }
+
     /// Upgrades the implementation to a new WASM hash.
     ///
     /// `expected_storage_version` must match the currently stored version; this
@@ -179,9 +190,16 @@ impl ProxyContract {
     /// Upgrades the proxy contract's own WASM (not the implementation).
     ///
     /// This is separate from `upgrade()` which replaces the implementation hash.
-    /// Use this to update the proxy logic itself.
-    pub fn upgrade_proxy(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ProxyError> {
+    /// `expected_storage_version` must match the current storage layout version.
+    pub fn upgrade_proxy(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        expected_storage_version: u32,
+    ) -> Result<(), ProxyError> {
         let _admin = check_admin(&env);
+        if read_storage_version(&env) != expected_storage_version {
+            return Err(ProxyError::StorageVersionMismatch);
+        }
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -197,7 +215,7 @@ impl ProxyContract {
         to_version: String,
     ) -> Result<(), ProxyError> {
         let _admin = check_admin(&env);
-        let _ = env.invoke_contract::<Result<(), soroban_sdk::Error>>(
+        let migration_result = env.invoke_contract::<Result<(), soroban_sdk::Error>>(
             &impl_contract,
             &Symbol::new(&env, "migrate"),
             soroban_sdk::vec![
@@ -206,6 +224,9 @@ impl ProxyContract {
                 soroban_sdk::IntoVal::into_val(&to_version, &env),
             ],
         );
+        if migration_result.is_err() {
+            return Err(ProxyError::MigrationFailed);
+        }
         env.events().publish(
             (Symbol::new(&env, "ProxyMigrated"),),
             (from_version, to_version),
@@ -217,7 +238,24 @@ impl ProxyContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env};
+    use soroban_sdk::{contracterror, contractimpl, contract, testutils::Address as _, Address, BytesN, Env, IntoVal};
+
+    #[contracterror]
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[repr(u32)]
+    enum MockMigrationError {
+        Failed = 1,
+    }
+
+    #[contract]
+    struct MockMigrationContract;
+
+    #[contractimpl]
+    impl MockMigrationContract {
+        fn migrate(_env: Env, _from: String, _to: String) -> Result<(), MockMigrationError> {
+            Err(MockMigrationError::Failed)
+        }
+    }
 
     fn setup() -> (Env, Address, Address, BytesN<32>) {
         let env = Env::default();
@@ -237,6 +275,24 @@ mod test {
         assert_eq!(c.get_admin(), admin);
         assert_eq!(c.get_impl_hash(), impl_hash);
         assert_eq!(c.get_storage_version(), 0u32);
+    }
+
+    #[test]
+    fn test_get_impl_storage_info_returns_atomic_pair() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &1u32);
+
+        let (hash, version) = c.get_impl_storage_info();
+        assert_eq!(hash, impl_hash);
+        assert_eq!(version, 1u32);
+
+        let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+        c.upgrade(&new_hash, &1u32, &2u32);
+
+        let (hash, version) = c.get_impl_storage_info();
+        assert_eq!(hash, new_hash);
+        assert_eq!(version, 2u32);
     }
 
     #[test]
@@ -275,6 +331,34 @@ mod test {
     }
 
     #[test]
+    fn test_upgrade_accepts_new_storage_version_lower_than_current() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &5u32);
+
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        // expected matches current (5), but new_storage_version (3) moves backward
+        let result = c.try_upgrade(&new_hash, &5u32, &3u32);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(c.get_impl_hash(), new_hash);
+        assert_eq!(c.get_storage_version(), 3u32);
+    }
+
+    #[test]
+    fn test_upgrade_accepts_new_storage_version_equal_to_current() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &5u32);
+
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        // expected matches current (5), new_storage_version equals current (5)
+        let result = c.try_upgrade(&new_hash, &5u32, &5u32);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(c.get_impl_hash(), new_hash);
+        assert_eq!(c.get_storage_version(), 5u32);
+    }
+
+    #[test]
     fn test_set_admin_transfers_role() {
         let (env, contract_id, admin, impl_hash) = setup();
         let c = ProxyContractClient::new(&env, &contract_id);
@@ -300,6 +384,29 @@ mod test {
     }
 
     #[test]
+    fn test_propose_and_accept_same_admin_clears_pending_admin() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &0u32);
+
+        c.propose_admin(&admin);
+        c.accept_admin(&admin);
+
+        assert_eq!(c.get_admin(), admin);
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&Symbol::new(&env, PENDING_ADMIN_KEY)));
+        });
+
+        let new_admin = Address::generate(&env);
+        c.propose_admin(&new_admin);
+        c.accept_admin(&new_admin);
+        assert_eq!(c.get_admin(), new_admin);
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&Symbol::new(&env, PENDING_ADMIN_KEY)));
+        });
+    }
+
+    #[test]
     fn test_accept_admin_fails_if_wrong_address() {
         let (env, contract_id, admin, impl_hash) = setup();
         let c = ProxyContractClient::new(&env, &contract_id);
@@ -311,5 +418,24 @@ mod test {
 
         let result = c.try_accept_admin(&wrong_admin);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_rejected_after_transfer_already_accepted() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &0u32);
+
+        let new_admin = Address::generate(&env);
+        c.propose_admin(&new_admin);
+
+        // First acceptance succeeds: pending admin becomes admin, pending cleared.
+        c.accept_admin(&new_admin);
+        assert_eq!(c.get_admin(), new_admin);
+
+        // Replaying accept_admin as the (now current) admin must be rejected
+        // because the pending-admin record is gone.
+        let result = c.try_accept_admin(&new_admin);
+        assert_eq!(result, Err(Ok(ProxyError::NotInitialized)));
     }
 }

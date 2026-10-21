@@ -22,6 +22,16 @@ pub enum VestingCurve {
     ///
     /// A `decay_factor` of `0` degenerates to linear behaviour.
     /// Practical values: 50–500 bps (0.5 %–5 % per 1 ks window).
+    ///
+    /// # Resource / gas cost
+    ///
+    /// `TimeDecay` is more expensive than [`VestingCurve::Linear`] on-chain:
+    /// each claimable computation iterates once per 1 000-second window,
+    /// performing a fixed-point multiply and division per window
+    /// ([`crate::vesting_math::compute_cumulative_decay`]). Cost grows linearly
+    /// with stream duration — roughly 31 500 iterations for a one-year stream
+    /// versus a single multiplication for Linear. Prefer `Linear` for
+    /// long-duration streams unless front-weighted release is required.
     TimeDecay(u32),
 }
 
@@ -107,7 +117,8 @@ pub struct StreamOptions {
     pub pause_reason: Option<String>,
     /// Total amount withdrawn from this stream so far.
     pub total_withdrawn: i128,
-    /// Optional metadata blob associated with the stream.
+    /// Legacy inline metadata slot retained for persisted-schema compatibility.
+    /// Current metadata blobs are stored separately and read via `get_metadata`.
     pub metadata: Bytes,
     /// Optional URI pointing to off-chain metadata (IPFS or HTTPS, max 128 bytes).
     pub metadata_uri: Option<String>,

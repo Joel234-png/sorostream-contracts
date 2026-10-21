@@ -20,14 +20,18 @@ pub mod vesting_math;
 pub mod composability;
 pub mod roles;
 
+// Role resource regression benchmark.
+#[cfg(test)] mod role_cost_bench;
+
 pub use interface::SoroStreamInterface;
 pub use errors::StreamError;
 pub use types::{AuditEntry, CreateStreamOptions, CreateStreamParams, HealthStatus, Stats, Stream, StreamHealth, StreamOptions, StreamStatus, StreamTransition, VestingCurve, StreamQueryFilter, WithdrawalProof, WithdrawalRecord};
 pub use oracle::IPriceOracle;
 pub use composability::ISoroStreamComposability;
-pub use roles::AdminRole;
+pub use roles::{AdminRole, RoleHolders};
 
 #[cfg(test)] mod integration_tests;
+#[cfg(test)] mod cost_bench;
 // other test modules disabled during grace-period test restore
 #[cfg(test)] mod rate_limit_tests;
 #[cfg(test)] mod issue_520_tests;
@@ -48,6 +52,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_620_tests;
 #[cfg(test)] mod issue_656_chaos_tests;
 #[cfg(test)] mod issue_661_tests;
+#[cfg(test)] mod role_holders_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -95,7 +100,7 @@ use storage::{
     is_blocked, is_fee_exempt, is_paused_or_auto_unpause, is_recipient_allowed,
     is_rate_limit_exempt, is_reentrancy_locked, is_sender_promoted,
     is_token_whitelisted, is_whitelisted,
-    is_whitelist_enabled, load_stream, load_tranches,
+    is_whitelist_enabled, load_stream, load_stream_view, load_tranches,
     add_token_to_whitelist, set_token_whitelist_enabled,
     mark_nonce_used, MAX_PAUSE_DURATION, nonce_used,
     read_admin, read_applied_migrations, read_audit_log, read_fee_discount,
@@ -108,6 +113,7 @@ use storage::{
     remove_holdback,
     mark_stream_cancelled, is_stream_cancelled,
     remove_stream, remove_stream_tag, remove_token_from_whitelist, remove_tranches,
+    stream_entry_value_size,
     save_stream, save_tranches, set_active_stream_count, set_creation_fee_xlm,
     set_delegate, set_expiry_warning_window,
     set_expiry_warning_emitted, set_grace_period_ledgers, set_max_deposit_per_token, set_max_streams_per_sender,
@@ -647,6 +653,37 @@ impl SoroStreamContract {
         roles::get_fee_manager(&env)
     }
 
+    /// Transfers the `FeeManager` role from `old_holder` to `new_holder` in one
+    /// invocation.
+    pub fn transfer_fee_manager_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_fee_manager_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "FeeManager"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_fee_manager_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
+    }
+
     /// Assigns the `EmergencyPause` role to `assignee`.
     ///
     /// The emergency-pause operator may call `emergency_pause` and
@@ -697,6 +734,37 @@ impl SoroStreamContract {
     /// Returns the currently assigned `EmergencyPause` role address, or `None`.
     pub fn get_emergency_pause_role(env: Env) -> Option<Address> {
         roles::get_emergency_pause_role(&env)
+    }
+
+    /// Transfers the `EmergencyPause` role from `old_holder` to `new_holder` in
+    /// one invocation.
+    pub fn transfer_emergency_pause_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_emergency_pause_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "EmergencyPause"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_emergency_pause_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
     }
 
     /// Assigns the `Analytics` role to `assignee`.
@@ -751,6 +819,37 @@ impl SoroStreamContract {
         roles::get_analytics_role(&env)
     }
 
+    /// Transfers the `Analytics` role from `old_holder` to `new_holder` in one
+    /// invocation.
+    pub fn transfer_analytics_role(
+        env: Env,
+        admin: Address,
+        old_holder: Address,
+        new_holder: Address,
+    ) -> Result<(), StreamError> {
+        admin.require_auth();
+        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(StreamError::NotAuthorized);
+        }
+        roles::transfer_analytics_role(&env, &old_holder, &new_holder)?;
+        events::role_transferred(
+            &env,
+            &String::from_str(&env, "Analytics"),
+            &old_holder,
+            &new_holder,
+            &admin,
+        );
+        let entry = AuditEntry {
+            instruction: String::from_str(&env, "transfer_analytics_role"),
+            admin,
+            timestamp: env.ledger().timestamp(),
+            params: String::from_str(&env, ""),
+        };
+        append_audit_entry(&env, &entry);
+        Ok(())
+    }
+
     /// Assigns the `TokenAdmin` role to `assignee` (Issue #623).
     pub fn assign_token_admin(env: Env, admin: Address, assignee: Address) -> Result<(), StreamError> {
         admin.require_auth();
@@ -794,6 +893,15 @@ impl SoroStreamContract {
     /// Returns the currently assigned `TokenAdmin` address, or `None`.
     pub fn get_token_admin(env: Env) -> Option<Address> {
         roles::get_token_admin(&env)
+    }
+
+    /// Returns all currently-assigned admin roles in a single view (Issue #753).
+    ///
+    /// Aggregates the super-admin and every fine-grained role (fee manager,
+    /// emergency pause, analytics, token admin) so a caller can assemble the
+    /// full picture of who holds what with one invocation instead of five.
+    pub fn get_role_holders(env: Env) -> RoleHolders {
+        roles::get_role_holders(&env)
     }
 
     pub fn set_fee_admin(env: Env, admin: Address, fee_admin: Address) -> Result<(), StreamError> {
@@ -2489,7 +2597,7 @@ impl SoroStreamContract {
     ///
     /// The `decay_factor` is expressed in **basis points per 1 000 seconds**
     /// (e.g. `100` = 1 % per 1 ks window).  A value of `0` is identical to
-    /// `VestingCurve::Linear`.  Values ≥ 10 000 are clamped to 9 999 internally.
+    /// `VestingCurve::Linear`. Values ≥ 10 000 are rejected.
     ///
     /// All other fields behave identically to `create_stream`.
     #[allow(dead_code)]
@@ -2530,6 +2638,9 @@ impl SoroStreamContract {
         }
         if amount <= 0 {
             return Err(StreamError::ZeroAmount);
+        }
+        if matches!(&curve, VestingCurve::TimeDecay(decay_factor) if *decay_factor >= 10_000) {
+            return Err(StreamError::InvalidParameter);
         }
         validate_recipient_address(&env, &sender, &recipient)?;
         if cliff_seconds > duration_seconds {
@@ -6553,8 +6664,35 @@ impl SoroStreamContract {
     /// persisted value is still `Active` or `Completed`. This makes it unnecessary
     /// for clients to compare timestamps themselves.
     pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError> {
-        let stream = load_stream(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
+        let stream = load_stream_view(&env, stream_id).ok_or(StreamError::StreamNotFound)?;
         Ok(refreshed_stream_view(&env, stream))
+    }
+
+    /// Estimates the XLM rent for the stream value over `ledgers` ledgers.
+    ///
+    /// `rent_rate_stroops_per_kib_per_ledger` must be the current network rate.
+    /// The result is in stroops and covers the stream value only; it excludes
+    /// the storage key and auxiliary index entries, so treat it as a baseline.
+    pub fn estimate_stream_rent_cost(
+        env: Env,
+        stream_id: u64,
+        rent_rate_stroops_per_kib_per_ledger: i128,
+        ledgers: u32,
+    ) -> Result<i128, StreamError> {
+        if rent_rate_stroops_per_kib_per_ledger < 0 {
+            return Err(StreamError::InvalidAmount);
+        }
+        let value_bytes = stream_entry_value_size(&env, stream_id)
+            .ok_or(StreamError::StreamNotFound)? as i128;
+        let byte_ledger_cost = value_bytes
+            .checked_mul(ledgers as i128)
+            .and_then(|cost| cost.checked_mul(rent_rate_stroops_per_kib_per_ledger))
+            .ok_or(StreamError::Overflow)?;
+        let cost_stroops = byte_ledger_cost
+            .checked_add(1023)
+            .ok_or(StreamError::Overflow)?
+            / 1024;
+        Ok(cost_stroops)
     }
 
     /// Returns the last 10 persisted lifecycle transitions for a stream.

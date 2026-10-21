@@ -277,7 +277,7 @@ impl MultiSigContract {
 
         env.events().publish(
             (Symbol::new(&env, "IntentProposed"), id),
-            (proposer, target, function, nonce, expiry),
+            (proposer, target, function, nonce, expiry, calldata),
         );
 
         Ok(id)
@@ -288,6 +288,17 @@ impl MultiSigContract {
     /// When the approval count reaches the threshold the operation executes
     /// automatically and `true` is returned. Returns `false` if the threshold
     /// has not yet been reached.
+    ///
+    /// Execution invokes `intent.function` on `intent.target` with
+    /// `intent.calldata` as a single raw `Bytes` argument, assuming the target
+    /// returns `()`. This is the generic "invoke a target with one raw `Bytes`
+    /// argument" execution convention shared with governance's `execute`.
+    ///
+    /// It is NOT the convention used by the main stream contract, whose entry
+    /// points take distinct typed parameters and return `Result<_, StreamError>`.
+    /// Consequently, a multi-sig intent cannot directly invoke the stream
+    /// contract's real entry points through this path; an adapter accepting a
+    /// single `Bytes` argument would be required.
     pub fn approve(
         env: Env,
         owner: Address,

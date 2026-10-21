@@ -14,7 +14,7 @@ use crate::errors::StreamError;
 use soroban_sdk::{
     testutils::Address as _,
     token::StellarAssetClient,
-    Address, Env,
+    Address, Env, IntoVal, Symbol,
 };
 
 struct TestEnv {
@@ -42,6 +42,16 @@ fn setup() -> TestEnv {
 
 fn client(t: &TestEnv) -> SoroStreamContractClient<'_> {
     SoroStreamContractClient::new(&t.env, &t.contract_id)
+}
+
+fn migration_authority_events(t: &TestEnv) -> std::vec::Vec<bool> {
+    t.env.events().all().iter().filter_map(|(_, topics, data)| {
+        if topics.is_empty() || topics.get(0).unwrap().into_val(&t.env) != Symbol::new(&t.env, "MigrationAuthority") {
+            return None;
+        }
+        let (explicitly_configured,): (bool,) = data.clone().into_val(&t.env);
+        Some(explicitly_configured)
+    }).collect()
 }
 
 // ─── Issue #625 tests ───────────────────────────────────────────────────────
@@ -83,6 +93,7 @@ fn test_625_admin_can_migrate_storage() {
         Err(Ok(e)) => panic!("Admin migrate_storage failed with unexpected error: {:?}", e),
         Err(Err(e)) => panic!("Admin migrate_storage failed with invoke error: {:?}", e),
     }
+    assert_eq!(migration_authority_events(&t), std::vec![false]);
 }
 
 /// A designated migration admin (different from contract admin) can run migrate_storage.
@@ -114,6 +125,7 @@ fn test_625_migration_admin_can_migrate_storage() {
         Err(Ok(e)) => panic!("Migration admin failed with unexpected error: {:?}", e),
         Err(Err(e)) => panic!("Migration admin failed with invoke error: {:?}", e),
     }
+    assert_eq!(migration_authority_events(&t), std::vec![true]);
 }
 
 /// A random third party must be rejected even when a migration admin is set.

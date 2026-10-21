@@ -20,12 +20,11 @@ struct PETestEnv {
     recipient: Address,
 }
 
-fn default_options() -> StreamCreateOptions {
-    StreamCreateOptions {
-        renew_count: None,
-        recurrence: None,
+fn default_options() -> CreateStreamOptions {
+    CreateStreamOptions {
         allow_recipient_termination: false,
         non_transferable: false,
+        ..Default::default()
     }
 }
 
@@ -379,11 +378,12 @@ fn test_auto_renew_recurrence_decays_and_expires() {
         &t.sender, &t.recipient, &t.token_id, &deposit, &duration, &0, &0u64,
         &true, // auto_renew = true
         &0u64,
-        &StreamCreateOptions {
+        &CreateStreamOptions {
             renew_count: None,
             recurrence: Some(3), // 3 renewals allowed → 4 total cycles
             allow_recipient_termination: false,
             non_transferable: false,
+            ..Default::default()
         },
     );
 

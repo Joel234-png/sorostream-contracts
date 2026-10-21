@@ -137,6 +137,14 @@ pub fn contract_deployed(env: &Env, version: &String, admin: &Address) {
     );
 }
 
+/// Records which migration authority path authorized a storage migration.
+pub fn migration_authority_used(env: &Env, explicitly_configured: bool) {
+    env.events().publish(
+        (Symbol::new(env, "MigrationAuthority"),),
+        (explicitly_configured,),
+    );
+}
+
 /// Emitted when a sender partially cancels a stream, spawning a new smaller stream.
 pub fn stream_partial_cancelled(
     env: &Env,

@@ -51,6 +51,67 @@ pub use roles::{AdminRole, RoleHolders};
 #[cfg(test)] mod issue_661_tests;
 #[cfg(test)] mod role_holders_tests;
 
+// Test, benchmark, and fuzz modules are declared explicitly so files cannot silently
+// disappear from `cargo test`; CI checks both missing and stale declarations.
+#[cfg(test)] mod acl_tests;
+#[cfg(test)] mod batch_cancel_tests;
+#[cfg(test)] mod bonus_tests;
+#[cfg(test)] mod cargo_audit_tests;
+#[cfg(test)] mod cascade_tests;
+#[cfg(test)] mod claimable_boundary_tests;
+#[cfg(test)] mod decay_vesting_tests;
+#[cfg(test)] mod differential_fuzz;
+#[cfg(test)] mod entry_point_tests;
+#[cfg(test)] mod event_field_tests;
+#[cfg(test)] mod event_versioning_tests;
+#[cfg(test)] mod feature_tests;
+#[cfg(test)] mod grace_period_tests;
+#[cfg(test)] mod issue_401_tests;
+#[cfg(test)] mod issue_516_tests;
+#[cfg(test)] mod issue_517_tests;
+#[cfg(test)] mod issue_518_tests;
+#[cfg(test)] mod issue_602_tests;
+#[cfg(test)] mod issue_603_tests;
+#[cfg(test)] mod issue_604_tests;
+#[cfg(test)] mod issue_605_tests;
+#[cfg(test)] mod issue_606_tests;
+#[cfg(test)] mod issue_607_tests;
+#[cfg(test)] mod issue_608_tests;
+#[cfg(test)] mod issue_609_tests;
+#[cfg(test)] mod issue_622_tests;
+#[cfg(test)] mod issue_623_tests;
+#[cfg(test)] mod issue_624_tests;
+#[cfg(test)] mod issue_625_tests;
+#[cfg(test)] mod issue_628_tests;
+#[cfg(test)] mod issue_629_tests;
+#[cfg(test)] mod issue_633_tests;
+#[cfg(test)] mod issue_634_tests;
+#[cfg(test)] mod issue_638_tests;
+#[cfg(test)] mod issue_640_tests;
+#[cfg(test)] mod issue_641_tests;
+#[cfg(test)] mod issue_643_tests;
+#[cfg(test)] mod issue_644_tests;
+#[cfg(test)] mod issue_647_tests;
+#[cfg(test)] mod issue_763_tests;
+#[cfg(test)] mod lifecycle_integration_tests;
+#[cfg(test)] mod oracle_rate_adjustment_tests;
+#[cfg(test)] mod paginated_recipient_tests;
+#[cfg(test)] mod proptest_tests;
+#[cfg(test)] mod protocol_economics_tests;
+#[cfg(test)] mod sender_whitelist_tests;
+#[cfg(test)] mod storage_bench;
+#[cfg(test)] mod storage_layout_snapshot_tests;
+#[cfg(test)] mod stream_analytics_tests;
+#[cfg(test)] mod stream_manager_tests;
+#[cfg(test)] mod stream_nft_tests;
+#[cfg(test)] mod stream_tags_tests;
+#[cfg(test)] mod subscription_tests;
+#[cfg(test)] mod test;
+#[cfg(test)] mod testnet_integration_tests;
+#[cfg(test)] mod tranche_oracle_tests;
+#[cfg(test)] mod upgrade_migration_tests;
+#[cfg(test)] mod upgrade_proposal_tests;
+
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
 };

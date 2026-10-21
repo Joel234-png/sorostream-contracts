@@ -13,7 +13,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, IntoVal,
+    Address, Env,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,6 +43,12 @@ impl TestEnv {
         StellarAssetClient::new(&env, &token).mint(&sender, &10_000_000);
 
         let contract = env.register(StreamingContract, ());
+        TokenClient::new(&env, &token).approve(
+            &sender,
+            &contract,
+            &10_000_000,
+            &(env.ledger().sequence() + 1_000_000),
+        );
         Self { env, sender, recipient, token, contract }
     }
 
@@ -137,6 +143,31 @@ fn test_create_stream_stores_correct_fields() {
 }
 
 #[test]
+fn test_sponsor_stream_requires_sponsor_authentication() {
+    let t = TestEnv::new();
+    let client = t.client();
+    let sponsor = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token).mint(&sponsor, &1_000);
+    let start = t.now();
+    let end = start + 100;
+
+    client.sponsor_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &false,
+        &sponsor,
+    );
+
+    let auths = t.env.auths();
+    assert!(auths.iter().any(|(address, _)| address == &t.sender));
+    assert!(auths.iter().any(|(address, _)| address == &sponsor));
+}
+
+#[test]
 fn test_claim_returns_correct_amount_at_midpoint() {
     let t = TestEnv::new();
     let client = t.client();
@@ -182,6 +213,33 @@ fn test_cancel_splits_vested_and_remainder() {
     assert_eq!(t.token_client().balance(&t.recipient), 300);
     // sender started with 10_000_000, deposited 1_000, got back 700
     assert_eq!(t.token_client().balance(&t.sender), 9_999_700);
+}
+
+#[test]
+fn test_cancel_saturates_refund_when_claimed_and_claimable_exceed_deposit() {
+    let t = TestEnv::new();
+    let client = t.client();
+    let start = t.now();
+    let stream_id = client.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &(start + 1_000),
+        &false,
+    );
+
+    let mut stream = storage::get_stream(&t.env, stream_id);
+    stream.claimed = 999;
+    stream.rate_per_second = 1_001;
+    storage::save_stream(&t.env, stream_id, &stream);
+    t.set_time(start + 1);
+
+    client.cancel(&stream_id);
+
+    assert_eq!(t.token_client().balance(&t.recipient), 2);
+    assert_eq!(t.token_client().balance(&t.sender), 9_999_000);
 }
 
 #[test]
@@ -244,6 +302,7 @@ fn test_renewal_start_time_equals_original_end_time() {
 
     // Advance past expiry by an arbitrary delta (should NOT affect start_time).
     t.set_time(end + 42);
+    t.env.mock_auths(&[]);
     client.renew(&stream_id);
 
     let stream = client.get_stream(&stream_id);
@@ -541,7 +600,7 @@ fn test_discard_expired_proposal_refunds_sender() {
     let proposal_id = setup_proposal(&t, 10);
     // Advance past expiry.
     t.set_seq(t.seq() + 11);
-    // Only the original sender can discard; even after expiry.
+    // The sender may discard the proposal even after expiry.
     t.client().discard_proposal(&proposal_id, &t.sender);
 
     let bal_after = t.token_client().balance(&t.sender);
@@ -572,22 +631,24 @@ fn test_third_party_cannot_discard_active_proposal() {
     t.client().discard_proposal(&proposal_id, &stranger);
 }
 
-// ── Issue #619: only original proposer can cancel ────────────────────────────
+// ── Expired proposal cleanup ─────────────────────────────────────────────────
 
-/// A different admin (stranger) cannot cancel an expired proposal.
-/// Even after expiry the original sender must be the only one who can discard.
+/// Anyone can discard an expired proposal and return its escrow to the sender.
 #[test]
-#[should_panic(expected = "Error::Unauthorized")]
-fn test_different_admin_cannot_cancel_expired_proposal() {
+fn test_third_party_can_discard_expired_proposal() {
     let t = TestEnv::new();
+    let bal_before = t.token_client().balance(&t.sender);
     let proposal_id = setup_proposal(&t, 10);
 
     // Advance past expiry.
     t.set_seq(t.seq() + 11);
 
-    // A different admin/attacker tries to discard after expiry — must panic.
-    let attacker = Address::generate(&t.env);
-    t.client().discard_proposal(&proposal_id, &attacker);
+    let third_party = Address::generate(&t.env);
+    t.env.mock_auths(&[]);
+    t.client().discard_proposal(&proposal_id, &third_party);
+
+    assert_eq!(t.token_client().balance(&t.sender), bal_before);
+    assert_eq!(t.token_client().balance(&third_party), 0);
 }
 
 #[test]

@@ -12,6 +12,9 @@
 mod storage;
 mod types;
 
+#[cfg(test)]
+mod test;
+
 pub use types::{DataKey, Stream, StreamProposal};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};
@@ -200,7 +203,10 @@ impl StreamingContract {
         assert!(!stream.cancelled, "stream already cancelled");
 
         let claimable = Self::_claimable(&env, &stream);
-        let refund = stream.deposit - stream.claimed - claimable;
+        let refund = stream
+            .deposit
+            .saturating_sub(stream.claimed)
+            .saturating_sub(claimable);
 
         stream.cancelled = true;
         storage::save_stream(&env, stream_id, &stream);
@@ -223,10 +229,10 @@ impl StreamingContract {
     ///
     /// Must be called at or after `end_time`. The renewed stream's `start_time`
     /// is exactly the previous `end_time` (not `now`), preserving correct
-    /// accounting.
+    /// accounting. The sender must maintain enough token allowance for this
+    /// renewal; any caller may then trigger it.
     pub fn renew(env: Env, stream_id: u64) {
         let mut stream = storage::get_stream(&env, stream_id);
-        stream.sender.require_auth();
 
         assert!(stream.auto_renew, "auto_renew is not enabled for this stream");
         assert!(!stream.cancelled, "stream is cancelled");
@@ -247,7 +253,8 @@ impl StreamingContract {
         }
 
         // Pull a fresh deposit for the next cycle.
-        token::Client::new(&env, &stream.token).transfer(
+        token::Client::new(&env, &stream.token).transfer_from(
+            &env.current_contract_address(),
             &stream.sender,
             &env.current_contract_address(),
             &stream.deposit,
@@ -284,7 +291,8 @@ impl StreamingContract {
     ///
     /// The sender's deposit is held by the contract. If the co-signer does not
     /// approve within `approval_window_ledgers` ledgers, anyone can call
-    /// `discard_proposal` to return the deposit.
+    /// `discard_proposal` to return the deposit. Before expiry, only the sender
+    /// can retract the proposal.
     pub fn propose_stream(
         env: Env,
         sender: Address,
@@ -382,20 +390,19 @@ impl StreamingContract {
 
     /// Discard an expired (or otherwise unwanted) proposal and return the deposit.
     ///
-    /// Only the original sender who created the proposal can discard it, both
-    /// before and after expiry. This prevents a compromised admin from cancelling
-    /// an active proposal and replacing it with a malicious one.
+    /// Before expiry, only the original sender can discard the proposal. After
+    /// expiry, anyone can call this method to return the escrowed deposit to the
+    /// sender.
     pub fn discard_proposal(env: Env, proposal_id: u64, caller: Address) {
         let proposal = storage::get_proposal(&env, proposal_id);
-
-        // Only the original proposer (sender) may ever cancel this proposal.
-        // A different admin cannot override an existing proposal, ensuring the
-        // timelock's intent is preserved even if admin credentials are compromised.
-        assert!(
-            caller == proposal.sender,
-            "Error::Unauthorized: only the original proposer can cancel this proposal"
-        );
-        caller.require_auth();
+        let expired = env.ledger().sequence() > proposal.expiry_ledger;
+        if !expired {
+            assert!(
+                caller == proposal.sender,
+                "Error::Unauthorized: only the original proposer can cancel this proposal"
+            );
+            caller.require_auth();
+        }
 
         // Return escrowed deposit to sender.
         token::Client::new(&env, &proposal.token).transfer(

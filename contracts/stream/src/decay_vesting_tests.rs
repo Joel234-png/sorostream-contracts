@@ -471,6 +471,23 @@ fn test_contract_linear_curve_stored_and_claimable() {
 }
 
 #[test]
+fn test_contract_rejects_out_of_range_decay_factor() {
+    let t = setup_decay();
+    let c = decay_client(&t);
+    t.env.ledger().set_timestamp(0);
+
+    let result = c.try_create_stream_with_curve(
+        &t.sender, &t.recipient, &t.token_id,
+        &100_000, &10_000, &0,
+        &0, &false, &None, &0, &false,
+        &VestingCurve::TimeDecay(10_000),
+        &None, &None, &false,
+    );
+
+    assert!(matches!(result, Err(Ok(StreamError::InvalidParameter))));
+}
+
+#[test]
 fn test_contract_decay_curve_stored_and_claimable_gte_linear() {
     let t = setup_decay();
     let c = decay_client(&t);

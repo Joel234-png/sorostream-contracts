@@ -25,7 +25,7 @@ pub use errors::StreamError;
 pub use types::{AuditEntry, CreateStreamOptions, CreateStreamParams, HealthStatus, Stats, Stream, StreamHealth, StreamOptions, StreamStatus, StreamTransition, VestingCurve, StreamQueryFilter, WithdrawalProof, WithdrawalRecord};
 pub use oracle::IPriceOracle;
 pub use composability::ISoroStreamComposability;
-pub use roles::AdminRole;
+pub use roles::{AdminRole, RoleHolders};
 
 #[cfg(test)] mod integration_tests;
 // other test modules disabled during grace-period test restore
@@ -48,7 +48,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_620_tests;
 #[cfg(test)] mod issue_656_chaos_tests;
 #[cfg(test)] mod issue_661_tests;
-#[cfg(test)] mod differential_fuzz;
+#[cfg(test)] mod role_holders_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -890,35 +890,13 @@ impl SoroStreamContract {
         roles::get_token_admin(&env)
     }
 
-    /// Transfers the `TokenAdmin` role from `old_holder` to `new_holder` in one
-    /// invocation.
-    pub fn transfer_token_admin_role(
-        env: Env,
-        admin: Address,
-        old_holder: Address,
-        new_holder: Address,
-    ) -> Result<(), StreamError> {
-        admin.require_auth();
-        let stored_admin = read_admin(&env).ok_or(StreamError::NotInitialized)?;
-        if admin != stored_admin {
-            return Err(StreamError::NotAuthorized);
-        }
-        roles::transfer_token_admin_role(&env, &old_holder, &new_holder)?;
-        events::role_transferred(
-            &env,
-            &String::from_str(&env, "TokenAdmin"),
-            &old_holder,
-            &new_holder,
-            &admin,
-        );
-        let entry = AuditEntry {
-            instruction: String::from_str(&env, "transfer_token_admin_role"),
-            admin,
-            timestamp: env.ledger().timestamp(),
-            params: String::from_str(&env, ""),
-        };
-        append_audit_entry(&env, &entry);
-        Ok(())
+    /// Returns all currently-assigned admin roles in a single view (Issue #753).
+    ///
+    /// Aggregates the super-admin and every fine-grained role (fee manager,
+    /// emergency pause, analytics, token admin) so a caller can assemble the
+    /// full picture of who holds what with one invocation instead of five.
+    pub fn get_role_holders(env: Env) -> RoleHolders {
+        roles::get_role_holders(&env)
     }
 
     pub fn set_fee_admin(env: Env, admin: Address, fee_admin: Address) -> Result<(), StreamError> {

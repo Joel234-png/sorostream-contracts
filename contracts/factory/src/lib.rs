@@ -25,8 +25,11 @@
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod storage_bench;
+
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +50,9 @@ pub struct DeploymentInfo {
     pub deploy_timestamp: u64,
     /// WASM hash used for this deployment (encodes the contract version).
     pub wasm_hash: BytesN<32>,
+    /// Optional human-readable label supplied by the deployer (e.g.
+    /// "production-mainnet-v2") for dashboard identification.
+    pub label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +100,8 @@ pub enum FactoryError {
     Unauthorized = 2,
     /// Factory has not been initialised yet.
     NotInitialized = 3,
+    /// The proposed admin is the same as the current admin.
+    NewAdminSameAsCurrent = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +147,8 @@ impl StreamFactory {
     /// * `wasm_hash` - SHA-256 hash of the child contract WASM (previously
     ///   uploaded via `env.deployer().upload_contract_wasm()`).
     /// * `salt` - 32-byte salt used to derive the deterministic address.
+    /// * `label` - Optional human-readable label attached to the deployment
+    ///   (e.g. "production-mainnet-v2") for dashboard identification.
     ///
     /// # Returns
     /// The `Address` of the newly deployed child contract.
@@ -147,6 +157,7 @@ impl StreamFactory {
         admin: Address,
         wasm_hash: BytesN<32>,
         salt: BytesN<32>,
+        label: Option<String>,
     ) -> Result<Address, FactoryError> {
         // Auth + admin check.
         admin.require_auth();
@@ -172,6 +183,7 @@ impl StreamFactory {
             deploy_ledger: env.ledger().sequence(),
             deploy_timestamp: env.ledger().timestamp(),
             wasm_hash,
+            label,
         };
         env.storage()
             .persistent()
@@ -225,9 +237,16 @@ impl StreamFactory {
             .get(&admin_key(&env))
             .ok_or(FactoryError::NotInitialized)?;
         admin.require_auth();
+        if new_admin == admin {
+            return Err(FactoryError::NewAdminSameAsCurrent);
+        }
         env.storage()
             .instance()
             .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"),),
+            new_admin,
+        );
         Ok(())
     }
 
@@ -245,6 +264,10 @@ impl StreamFactory {
         env.storage()
             .instance()
             .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 }

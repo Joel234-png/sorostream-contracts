@@ -11,7 +11,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
+    testutils::{storage::Persistent, Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env,
 };
@@ -52,11 +52,11 @@ impl TestEnv {
         Self { env, sender, recipient, token, contract }
     }
 
-    fn client(&self) -> StreamingContractClient {
+    fn client(&self) -> StreamingContractClient<'_> {
         StreamingContractClient::new(&self.env, &self.contract)
     }
 
-    fn token_client(&self) -> TokenClient {
+    fn token_client(&self) -> TokenClient<'_> {
         TokenClient::new(&self.env, &self.token)
     }
 
@@ -85,6 +85,11 @@ impl TestEnv {
     fn seq(&self) -> u32 {
         self.env.ledger().get().sequence_number
     }
+
+    fn approve_renewals(&self, sender: &Address, amount: i128) {
+        self.token_client()
+            .approve(sender, &self.contract, &amount, &(self.seq() + 1_000));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +110,7 @@ fn test_create_stream_contract_as_sender_is_rejected() {
 
     // Use the contract address as the sender — must panic with InvalidSender.
     client.create_stream(
-        &t.contract,    // sender == contract_address ← must be rejected
+        &t.contract, // sender == contract_address ← must be rejected
         &t.recipient,
         &t.token,
         &1_000_i128,
@@ -249,7 +254,13 @@ fn test_double_cancel_panics() {
     let client = t.client();
     let start = t.now();
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &(start + 1_000), &false,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &(start + 1_000),
+        &false,
     );
     client.cancel(&stream_id);
     client.cancel(&stream_id); // must panic
@@ -263,7 +274,13 @@ fn test_claim_before_start_panics() {
     // Stream starts 500 s in the future
     let start = t.now() + 500;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &(start + 1_000), &false,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &(start + 1_000),
+        &false,
     );
     client.claim(&stream_id);
 }
@@ -275,7 +292,13 @@ fn test_claimable_caps_at_deposit() {
     let start = t.now();
     let end = start + 1_000;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &false,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &false,
     );
 
     // Jump way past end — claimable should not exceed deposit.
@@ -297,9 +320,16 @@ fn test_renewal_start_time_equals_original_end_time() {
     let end = start + 1_000;
 
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 1_000);
     // Advance past expiry by an arbitrary delta (should NOT affect start_time).
     t.set_time(end + 42);
     t.env.mock_auths(&[]);
@@ -310,7 +340,62 @@ fn test_renewal_start_time_equals_original_end_time() {
         stream.start_time, end,
         "renewed stream.start_time must equal original end_time"
     );
-    assert_eq!(stream.end_time, end + 1_000, "renewed stream.end_time is wrong");
+    assert_eq!(
+        stream.end_time,
+        end + 1_000,
+        "renewed stream.end_time is wrong"
+    );
+}
+
+/// A keeper can renew after the sender grants the contract token allowance;
+/// the sender does not need to authorize the keeper's transaction.
+#[test]
+fn test_keeper_renews_with_sender_allowance() {
+    let t = TestEnv::new();
+    let client = t.client();
+    let start = t.now();
+    let end = start + 100;
+    let stream_id = client.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
+    );
+    t.approve_renewals(&t.sender, 1_000);
+    t.set_time(end);
+    // Model a keeper transaction with no sender authorization.
+    t.env.mock_auths(&[]);
+
+    client.renew(&stream_id);
+
+    assert_eq!(t.token_client().balance(&t.sender), 9_998_000);
+    assert_eq!(client.get_stream(&stream_id).start_time, end);
+}
+
+#[test]
+fn test_keeper_cannot_renew_without_sender_allowance() {
+    let t = TestEnv::new();
+    let client = t.client();
+    let start = t.now();
+    let end = start + 100;
+    let stream_id = client.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
+    );
+    let sender_balance = t.token_client().balance(&t.sender);
+    t.set_time(end);
+
+    assert!(client.try_renew(&stream_id).is_err());
+    assert_eq!(t.token_client().balance(&t.sender), sender_balance);
+    assert_eq!(client.get_stream(&stream_id).start_time, start);
 }
 
 /// At the exact ledger of renewal, the claimable balance must be zero
@@ -323,9 +408,16 @@ fn test_claimable_at_renewal_ledger_is_zero() {
     let end = start + 1_000;
 
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 1_000);
     t.set_time(end); // exactly at expiry
     client.renew(&stream_id);
 
@@ -347,9 +439,16 @@ fn test_claimable_ten_ledgers_into_renewed_stream() {
     let end = start + 1_000;
     // rate = 1 token/second (deposit 1000 / duration 1000)
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 1_000);
     t.set_time(end);
     client.renew(&stream_id);
 
@@ -371,7 +470,13 @@ fn test_renew_before_expiry_panics() {
     let start = t.now();
     let end = start + 1_000;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
     t.set_time(end - 1);
     client.renew(&stream_id);
@@ -386,7 +491,13 @@ fn test_renew_without_flag_panics() {
     let start = t.now();
     let end = start + 1_000;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &false,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &false,
     );
     t.set_time(end + 1);
     client.renew(&stream_id);
@@ -402,9 +513,16 @@ fn test_multiple_renewals_chain_correctly() {
     let end = start + duration;
 
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 3_000);
     for cycle in 1u64..=3 {
         t.set_time(start + duration * cycle);
         client.renew(&stream_id);
@@ -419,7 +537,10 @@ fn test_multiple_renewals_chain_correctly() {
             start + duration * (cycle + 1),
             "cycle {cycle}: end_time mismatch"
         );
-        assert_eq!(stream.claimed, 0, "cycle {cycle}: claimed should reset to 0");
+        assert_eq!(
+            stream.claimed, 0,
+            "cycle {cycle}: claimed should reset to 0"
+        );
     }
 }
 
@@ -441,9 +562,16 @@ fn test_reputation_increments_on_renewal() {
     let start = t.now();
     let end = start + 1_000;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 1_000);
     t.set_time(end);
     client.renew(&stream_id);
 
@@ -458,9 +586,16 @@ fn test_reputation_increments_on_each_renewal() {
     let duration = 1_000_u64;
     let end = start + duration;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 5_000);
     for i in 1u64..=5 {
         t.set_time(start + duration * i);
         client.renew(&stream_id);
@@ -479,7 +614,13 @@ fn test_reputation_not_incremented_on_cancel() {
     let start = t.now();
     let end = start + 1_000;
     let stream_id = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &false,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &false,
     );
 
     t.set_time(start + 500);
@@ -505,16 +646,36 @@ fn test_reputation_is_per_sender() {
 
     // sender1 creates + renews once
     let s1 = client.create_stream(
-        &t.sender, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
     // sender2 creates + renews twice
     let s2a = client.create_stream(
-        &sender2, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &sender2,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
     let s2b = client.create_stream(
-        &sender2, &t.recipient, &t.token, &1_000_i128, &start, &end, &true,
+        &sender2,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &true,
     );
 
+    t.approve_renewals(&t.sender, 1_000);
+    t.approve_renewals(&sender2, 2_000);
     t.set_time(end);
     client.renew(&s1);
     client.renew(&s2a);
@@ -617,7 +778,82 @@ fn test_sender_can_retract_before_expiry() {
     t.client().discard_proposal(&proposal_id, &t.sender);
 
     let bal_after = t.token_client().balance(&t.sender);
-    assert_eq!(bal_after, bal_before, "sender should be refunded after retraction");
+    assert_eq!(
+        bal_after, bal_before,
+        "sender should be refunded after retraction"
+    );
+}
+
+#[test]
+#[should_panic(expected = "proposal not found")]
+fn test_discard_proposal_twice_refunds_only_once() {
+    let t = TestEnv::new();
+    let bal_before = t.token_client().balance(&t.sender);
+    let proposal_id = setup_proposal(&t, 100);
+    let escrowed_balance = t.token_client().balance(&t.contract);
+
+    t.client().discard_proposal(&proposal_id, &t.sender);
+    assert_eq!(t.token_client().balance(&t.sender), bal_before);
+    assert_eq!(
+        t.token_client().balance(&t.contract),
+        escrowed_balance - 1_000
+    );
+
+    // The proposal has been removed, so this fails before a second transfer.
+    t.client().discard_proposal(&proposal_id, &t.sender);
+}
+
+#[test]
+fn test_missing_stream_and_proposal_return_typed_errors() {
+    let t = TestEnv::new();
+    assert!(matches!(
+        t.client().try_get_stream(&42),
+        Err(Ok(StreamingError::StreamNotFound)),
+    ));
+    assert!(matches!(
+        t.client().try_get_proposal(&42),
+        Err(Ok(StreamingError::ProposalNotFound)),
+    ));
+}
+
+#[test]
+fn test_bump_ttl_extends_dormant_stream_without_mutation() {
+    let t = TestEnv::new();
+    let start = t.now();
+    let stream_id = t.client().create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &(start + 1_000),
+        &false,
+    );
+    let ttl_before = t.env.as_contract(&t.contract, || {
+        t.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Stream(stream_id))
+    });
+    t.set_seq(t.seq() + ttl_before - 40);
+    let dormant_ttl = t.env.as_contract(&t.contract, || {
+        t.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Stream(stream_id))
+    });
+
+    t.client().bump_ttl(&stream_id);
+
+    let extended_ttl = t.env.as_contract(&t.contract, || {
+        t.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Stream(stream_id))
+    });
+    assert!(dormant_ttl < 50);
+    assert!(extended_ttl > dormant_ttl);
+    assert_eq!(t.client().get_stream(&stream_id).claimed, 0);
 }
 
 #[test]

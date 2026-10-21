@@ -9,6 +9,7 @@
 
 #![no_std]
 
+mod errors;
 mod storage;
 mod types;
 
@@ -17,7 +18,7 @@ mod test;
 
 pub use types::{DataKey, Stream, StreamProposal};
 
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, Env, Symbol};
 
 #[contract]
 pub struct StreamingContract;
@@ -225,7 +226,7 @@ impl StreamingContract {
         // Cancelled streams do NOT increment reputation.
     }
 
-    /// Pull-based auto-renewal (issue #8 fix).
+    /// Pull-based auto-renewal (issue #8 fix, with keeper authorization in #821).
     ///
     /// Must be called at or after `end_time`. The renewed stream's `start_time`
     /// is exactly the previous `end_time` (not `now`), preserving correct
@@ -234,7 +235,10 @@ impl StreamingContract {
     pub fn renew(env: Env, stream_id: u64) {
         let mut stream = storage::get_stream(&env, stream_id);
 
-        assert!(stream.auto_renew, "auto_renew is not enabled for this stream");
+        assert!(
+            stream.auto_renew,
+            "auto_renew is not enabled for this stream"
+        );
         assert!(!stream.cancelled, "stream is cancelled");
         assert!(
             env.ledger().timestamp() >= stream.end_time,
@@ -312,7 +316,10 @@ impl StreamingContract {
             deposit % (duration as i128) == 0,
             "deposit must be exactly divisible by duration"
         );
-        assert!(approval_window_ledgers > 0, "approval window must be positive");
+        assert!(
+            approval_window_ledgers > 0,
+            "approval window must be positive"
+        );
 
         let rate_per_second = deposit / (duration as i128);
 
@@ -361,10 +368,22 @@ impl StreamingContract {
 
         // Same non-enumerable ID derivation as create_stream/propose_stream.
         let nonce = storage::next_nonce(&env);
-        let mut stream_id = storage::derive_stream_id(&env, &proposal.sender, &proposal.recipient, start_time, nonce);
+        let mut stream_id = storage::derive_stream_id(
+            &env,
+            &proposal.sender,
+            &proposal.recipient,
+            start_time,
+            nonce,
+        );
         let mut retry = nonce + 1;
         while storage::stream_id_exists(&env, stream_id) {
-            stream_id = storage::derive_stream_id(&env, &proposal.sender, &proposal.recipient, start_time, retry);
+            stream_id = storage::derive_stream_id(
+                &env,
+                &proposal.sender,
+                &proposal.recipient,
+                start_time,
+                retry,
+            );
             retry += 1;
         }
         storage::save_stream(
@@ -418,8 +437,11 @@ impl StreamingContract {
     //  Read-only queries
     // ─────────────────────────────────────────────────────────────────────────
 
-    pub fn get_stream(env: Env, stream_id: u64) -> Stream {
-        storage::get_stream(&env, stream_id)
+    pub fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamingError> {
+        if !storage::stream_id_exists(&env, stream_id) {
+            return Err(StreamingError::StreamNotFound);
+        }
+        Ok(storage::get_stream(&env, stream_id))
     }
 
     pub fn get_claimable(env: Env, stream_id: u64) -> i128 {
@@ -427,8 +449,26 @@ impl StreamingContract {
         Self::_claimable(&env, &stream)
     }
 
-    pub fn get_proposal(env: Env, proposal_id: u64) -> StreamProposal {
-        storage::get_proposal(&env, proposal_id)
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Result<StreamProposal, StreamingError> {
+        if !storage::proposal_exists(&env, proposal_id) {
+            return Err(StreamingError::ProposalNotFound);
+        }
+        Ok(storage::get_proposal(&env, proposal_id))
+    }
+
+    /// Extend a stream's persistent storage lifetime for a stream that is
+    /// still actively queried but has not otherwise been written recently.
+    /// Anyone may call this entry point.
+    pub fn bump_ttl(env: Env, stream_id: u64) -> Result<(), StreamingError> {
+        if !storage::stream_id_exists(&env, stream_id) {
+            return Err(StreamingError::StreamNotFound);
+        }
+        let new_expiry_ledger = storage::bump_stream_ttl(&env, stream_id);
+        env.events().publish(
+            (Symbol::new(&env, "TtlBumped"), stream_id),
+            new_expiry_ledger,
+        );
+        Ok(())
     }
 
     // ─────────────────────────────────────────────────────────────────────────

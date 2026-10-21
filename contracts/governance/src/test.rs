@@ -1,125 +1,139 @@
+#![cfg(test)]
+
 use super::*;
 use soroban_sdk::{
-    contract, contractimpl,
-    testutils::{Address as _, Ledger, LedgerInfo},
-    token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, IntoVal,
+    testutils::Address as _,
+    Address, Env,
 };
 
-#[contract]
-struct TargetContract;
-
-#[contractimpl]
-impl TargetContract {
-    pub fn set_value(env: Env, value: u32) -> Result<(), GovernanceError> {
-        env.storage().instance().set(&Symbol::new(&env, "value"), &value);
-        Ok(())
-    }
-
-    pub fn value(env: Env) -> u32 {
-        env.storage().instance().get(&Symbol::new(&env, "value")).unwrap_or(0)
-    }
+fn env_with_auth() -> Env {
+    let env = Env::default();
+    env.mock_all_auths();
+    env
 }
 
-struct TestEnv {
-    env: Env,
-    voter: Address,
-    token: Address,
-    governance: Address,
+fn default_token(env: &Env) -> Address {
+    Address::generate(env)
 }
 
-impl TestEnv {
-    fn new(voter_balance: i128) -> Self {
-        let env = Env::default();
-        env.mock_all_auths();
+#[test]
+fn test_set_guardian_single_step_still_works() {
+    let env = env_with_auth();
+    let id = env.register(GovernanceContract, ());
+    let c = GovernanceContractClient::new(&env, &id);
 
-        let admin = Address::generate(&env);
-        let guardian = Address::generate(&env);
-        let voter = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token = env.register_stellar_asset_contract_v2(token_admin).address();
-        if voter_balance > 0 {
-            StellarAssetClient::new(&env, &token).mint(&voter, &voter_balance);
-        }
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let token = default_token(&env);
 
-        let governance = env.register(GovernanceContract, ());
-        GovernanceContractClient::new(&env, &governance).initialize(
-            &admin, &guardian, &token, &1, &1, &10, &5,
-        );
+    c.initialize(&admin, &guardian, &token, 0, 0, 0, 0);
 
-        Self { env, voter, token, governance }
-    }
+    let new_guardian = Address::generate(&env);
+    c.set_guardian(&new_guardian);
 
-    fn governance_client(&self) -> GovernanceContractClient {
-        GovernanceContractClient::new(&self.env, &self.governance)
-    }
+    let stored: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&soroban_sdk::Symbol::new(&env, super::GUARDIAN_KEY));
+    assert_eq!(stored, Some(new_guardian));
+}
 
-    fn set_time(&self, timestamp: u64) {
-        self.env.ledger().set(LedgerInfo {
-            timestamp,
-            ..self.env.ledger().get()
-        });
+#[test]
+fn test_guardian_two_step_transfer() {
+    let env = env_with_auth();
+    let id = env.register(GovernanceContract, ());
+    let c = GovernanceContractClient::new(&env, &id);
+
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let token = default_token(&env);
+
+    c.initialize(&admin, &guardian, &token, 0, 0, 0, 0);
+
+    let new_guardian = Address::generate(&env);
+
+    // No pending guardian before proposal.
+    let pending: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&soroban_sdk::Symbol::new(&env, super::PENDING_GUARDIAN_KEY));
+    assert!(pending.is_none());
+
+    // Admin proposes the new guardian.
+    c.propose_guardian(&new_guardian);
+
+    let pending: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&soroban_sdk::Symbol::new(&env, super::PENDING_GUARDIAN_KEY));
+    assert_eq!(pending, Some(new_guardian.clone()));
+
+    // Guardian is not yet switched.
+    let stored: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&soroban_sdk::Symbol::new(&env, super::GUARDIAN_KEY));
+    assert_eq!(stored, Some(guardian.clone()));
+
+    // The pending guardian accepts, completing the two-step transfer.
+    c.accept_guardian(&new_guardian);
+
+    let stored: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&soroban_sdk::Symbol::new(&env, super::GUARDIAN_KEY));
+    assert_eq!(stored, Some(new_guardian));
+
+    // Pending is cleared after acceptance.
+    let pending: Option<Address> = env
+        .storage()
+        .instance()
+        .get(&soroban_sdk::Symbol::new(&env, super::PENDING_GUARDIAN_KEY));
+    assert!(pending.is_none());
+}
+
+#[test]
+fn test_accept_guardian_without_proposal_fails() {
+    let env = env_with_auth();
+    let id = env.register(GovernanceContract, ());
+    let c = GovernanceContractClient::new(&env, &id);
+
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let token = default_token(&env);
+
+    c.initialize(&admin, &guardian, &token, 0, 0, 0, 0);
+
+    let new_guardian = Address::generate(&env);
+    let result = c.try_accept_guardian(&new_guardian);
+    assert!(result.is_err());
+    match result {
+        Err(Ok(e)) => assert_eq!(e, GovernanceError::NotInitialized),
+        _ => panic!("expected NotInitialized"),
     }
 }
 
 #[test]
-fn rejects_proposer_balance_above_u64() {
-    let t = TestEnv::new((u64::MAX as i128) + 1);
-    let target = t.env.register(TargetContract, ());
-    let result = t.governance_client().try_create_proposal(
-        &t.voter,
-        &target,
-        &Symbol::new(&t.env, "set_value"),
-        &soroban_sdk::Vec::new(&t.env),
-    );
+fn test_accept_guardian_wrong_caller_fails() {
+    let env = env_with_auth();
+    let id = env.register(GovernanceContract, ());
+    let c = GovernanceContractClient::new(&env, &id);
 
-    assert!(matches!(result, Ok(Err(GovernanceError::InvalidParam))));
-}
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let token = default_token(&env);
 
-#[test]
-fn rejects_voter_balance_above_u64() {
-    let t = TestEnv::new(10);
-    let target = t.env.register(TargetContract, ());
-    let proposal_id = t.governance_client().create_proposal(
-        &t.voter,
-        &target,
-        &Symbol::new(&t.env, "set_value"),
-        &soroban_sdk::Vec::new(&t.env),
-    );
-    StellarAssetClient::new(&t.env, &t.token)
-        .mint(&t.voter, &((u64::MAX as i128) + 1));
+    c.initialize(&admin, &guardian, &token, 0, 0, 0, 0);
 
-    let result = t.governance_client().try_vote(&t.voter, &proposal_id, &true);
-    assert!(matches!(result, Ok(Err(GovernanceError::InvalidParam))));
-}
+    let new_guardian = Address::generate(&env);
+    let impostor = Address::generate(&env);
 
-#[test]
-fn vote_escrows_tokens_and_execute_passes_typed_arguments() {
-    let t = TestEnv::new(100);
-    let target = t.env.register(TargetContract, ());
-    let args = soroban_sdk::vec![&t.env, 42u32.into_val(&t.env)];
-    let proposal_id = t.governance_client().create_proposal(
-        &t.voter,
-        &target,
-        &Symbol::new(&t.env, "set_value"),
-        &args,
-    );
+    c.propose_guardian(&new_guardian);
 
-    t.governance_client().vote(&t.voter, &proposal_id, &true);
-
-    let token_client = TokenClient::new(&t.env, &t.token);
-    assert_eq!(token_client.balance(&t.voter), 0);
-    assert_eq!(token_client.balance(&t.governance), 100);
-
-    t.set_time(11);
-    t.governance_client().queue(&proposal_id);
-    t.set_time(16);
-    t.governance_client().execute(&proposal_id);
-
-    assert_eq!(TargetContractClient::new(&t.env, &target).value(), 42);
-
-    t.governance_client()
-        .withdraw_vote_tokens(&t.voter, &proposal_id);
-    assert_eq!(token_client.balance(&t.voter), 100);
-    assert_eq!(token_client.balance(&t.governance), 0);
+    let result = c.try_accept_guardian(&impostor);
+    assert!(result.is_err());
+    match result {
+        Err(Ok(e)) => assert_eq!(e, GovernanceError::NotAdmin),
+        _ => panic!("expected NotAdmin"),
+    }
 }

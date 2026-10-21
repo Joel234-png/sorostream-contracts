@@ -28,6 +28,7 @@ pub use composability::ISoroStreamComposability;
 pub use roles::{AdminRole, RoleHolders};
 
 #[cfg(test)] mod integration_tests;
+#[cfg(test)] mod cost_bench;
 // other test modules disabled during grace-period test restore
 #[cfg(test)] mod rate_limit_tests;
 #[cfg(test)] mod issue_520_tests;

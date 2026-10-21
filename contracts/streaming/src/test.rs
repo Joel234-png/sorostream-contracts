@@ -13,7 +13,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, IntoVal,
+    Address, Env,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,6 +134,31 @@ fn test_create_stream_stores_correct_fields() {
     assert_eq!(stream.end_time, end);
     assert!(!stream.auto_renew);
     assert!(!stream.cancelled);
+}
+
+#[test]
+fn test_sponsor_stream_requires_sponsor_authentication() {
+    let t = TestEnv::new();
+    let client = t.client();
+    let sponsor = Address::generate(&t.env);
+    StellarAssetClient::new(&t.env, &t.token).mint(&sponsor, &1_000);
+    let start = t.now();
+    let end = start + 100;
+
+    client.sponsor_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &end,
+        &false,
+        &sponsor,
+    );
+
+    let auths = t.env.auths();
+    assert!(auths.iter().any(|(address, _)| address == &t.sender));
+    assert!(auths.iter().any(|(address, _)| address == &sponsor));
 }
 
 #[test]

@@ -178,6 +178,31 @@ fn test_deploy_records_metadata_and_registry() {
 }
 
 #[test]
+fn test_deployment_deployer_metadata_survives_admin_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let original_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    c.initialize(&original_admin);
+
+    let wasm_hash = upload_child_wasm(&env);
+    let first_child = c.deploy_stream_contract(&original_admin, &wasm_hash, &fake_salt(&env, 41));
+
+    c.propose_admin(&new_admin);
+    c.accept_admin(&new_admin);
+
+    let first_info = c.get_deployment_info(&first_child).unwrap();
+    assert_eq!(first_info.deployer, original_admin);
+
+    let second_child = c.deploy_stream_contract(&new_admin, &wasm_hash, &fake_salt(&env, 42));
+    let second_info = c.get_deployment_info(&second_child).unwrap();
+    assert_eq!(second_info.deployer, new_admin);
+}
+
+#[test]
 fn test_different_salts_give_different_addresses() {
     let env = Env::default();
     env.mock_all_auths();

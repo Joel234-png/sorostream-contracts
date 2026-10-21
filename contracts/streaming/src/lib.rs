@@ -12,6 +12,9 @@
 mod storage;
 mod types;
 
+#[cfg(test)]
+mod test;
+
 pub use types::{DataKey, Stream, StreamProposal};
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env};

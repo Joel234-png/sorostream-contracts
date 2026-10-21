@@ -55,7 +55,15 @@ pub struct Proposal {
     pub target: Address,
     /// Function name to call on the target.
     pub function: Symbol,
-    /// ABI-encoded arguments passed verbatim to the target.
+    /// Bytes passed as the sole argument to the target function by `execute`.
+    ///
+    /// A target exposing `noop(_ignored: Bytes) -> ()` works with function
+    /// `Symbol("noop")` and empty calldata. `execute` supplies that empty `Bytes`
+    /// value as the endpoint's one argument, which the no-op endpoint ignores.
+    /// Functions requiring multiple typed arguments or returning `Result` do
+    /// not currently work with this invocation pattern (see issue #712); update
+    /// this note when `execute` supports proper argument decoding and return
+    /// handling.
     pub calldata: Bytes,
     pub status: ProposalStatus,
     /// Ledger timestamp when voting opened.

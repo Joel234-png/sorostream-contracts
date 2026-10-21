@@ -300,6 +300,29 @@ mod test {
     }
 
     #[test]
+    fn test_propose_and_accept_same_admin_clears_pending_admin() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &0u32);
+
+        c.propose_admin(&admin);
+        c.accept_admin(&admin);
+
+        assert_eq!(c.get_admin(), admin);
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&Symbol::new(&env, PENDING_ADMIN_KEY)));
+        });
+
+        let new_admin = Address::generate(&env);
+        c.propose_admin(&new_admin);
+        c.accept_admin(&new_admin);
+        assert_eq!(c.get_admin(), new_admin);
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&Symbol::new(&env, PENDING_ADMIN_KEY)));
+        });
+    }
+
+    #[test]
     fn test_accept_admin_fails_if_wrong_address() {
         let (env, contract_id, admin, impl_hash) = setup();
         let c = ProxyContractClient::new(&env, &contract_id);

@@ -10,6 +10,9 @@
 //! 4. After the 48-hour timelock the proposal is executable via `execute`.
 //! 5. The guardian may `veto` a queued proposal before it executes.
 
+#[cfg(test)]
+mod test;
+
 use soroban_sdk::{
     contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
@@ -19,6 +22,7 @@ use soroban_sdk::{
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
 const GUARDIAN_KEY: &str = "guardian";
+const PENDING_GUARDIAN_KEY: &str = "pending_guardian";
 const TOKEN_KEY: &str = "token";
 const PROPOSAL_THRESHOLD_KEY: &str = "p_thresh";
 const QUORUM_KEY: &str = "quorum";
@@ -96,6 +100,10 @@ fn read_admin(env: &Env) -> Option<Address> {
 
 fn read_pending_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
+}
+
+fn read_pending_guardian(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_GUARDIAN_KEY))
 }
 
 fn check_admin(env: &Env) {
@@ -405,6 +413,40 @@ impl GovernanceContract {
     pub fn set_guardian(env: Env, new_guardian: Address) -> Result<(), GovernanceError> {
         check_admin(&env);
         env.storage().instance().set(&Symbol::new(&env, GUARDIAN_KEY), &new_guardian);
+        Ok(())
+    }
+
+    /// Proposes a new guardian address. Only admin may call this.
+    ///
+    /// The proposed guardian must call [`accept_guardian`] to complete the
+    /// two-step transfer, mirroring the admin propose/accept flow and avoiding
+    /// an accidental lockout from a typo'd address.
+    pub fn propose_guardian(env: Env, new_guardian: Address) -> Result<(), GovernanceError> {
+        check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PENDING_GUARDIAN_KEY), &new_guardian);
+        env.events().publish(
+            (Symbol::new(&env, "GuardianTransferProposed"),),
+            new_guardian,
+        );
+        Ok(())
+    }
+
+    /// Accepts the guardian role. The pending guardian must call this.
+    pub fn accept_guardian(env: Env, accepted_by: Address) -> Result<(), GovernanceError> {
+        accepted_by.require_auth();
+        let pending = read_pending_guardian(&env)
+            .ok_or(GovernanceError::NotInitialized)?;
+        if accepted_by != pending {
+            return Err(GovernanceError::NotAdmin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, GUARDIAN_KEY), &accepted_by);
+        env.storage().instance().remove(&Symbol::new(&env, PENDING_GUARDIAN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "GuardianTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 

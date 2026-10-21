@@ -259,3 +259,75 @@ pub fn has_any_role(env: &Env, caller: &Address, admin: &Address) -> bool {
     if get_analytics_role(env).as_ref() == Some(caller) { return true; }
     false
 }
+
+// ── Role-only auth helpers (no SuperAdmin fallback) ──────────────────────────
+
+/// Checks that `caller` holds the `FeeManager` / `FeeAdmin` role only
+/// (the SuperAdmin is NOT implicitly authorized).
+pub fn require_fee_manager(
+    env: &Env,
+    caller: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if let Some(ref fm) = get_fee_manager(env) {
+        if caller == fm {
+            return Ok(());
+        }
+    }
+    Err(crate::errors::StreamError::NotAuthorized)
+}
+
+pub fn require_fee_admin(
+    env: &Env,
+    caller: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    require_fee_manager(env, caller)
+}
+
+/// Checks that `caller` holds the `EmergencyPause` / `EmergencyAdmin` role only
+/// (the SuperAdmin is NOT implicitly authorized).
+pub fn require_emergency_pause(
+    env: &Env,
+    caller: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if let Some(ref ep) = get_emergency_pause_role(env) {
+        if caller == ep {
+            return Ok(());
+        }
+    }
+    Err(crate::errors::StreamError::NotAuthorized)
+}
+
+pub fn require_emergency_admin(
+    env: &Env,
+    caller: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    require_emergency_pause(env, caller)
+}
+
+/// Checks that `caller` holds the `TokenAdmin` role only
+/// (the SuperAdmin is NOT implicitly authorized).
+pub fn require_token_admin(
+    env: &Env,
+    caller: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if let Some(ref ta) = get_token_admin(env) {
+        if caller == ta {
+            return Ok(());
+        }
+    }
+    Err(crate::errors::StreamError::NotAuthorized)
+}
+
+/// Checks that `caller` holds the `Analytics` role only
+/// (the SuperAdmin is NOT implicitly authorized).
+pub fn require_analytics(
+    env: &Env,
+    caller: &Address,
+) -> Result<(), crate::errors::StreamError> {
+    if let Some(ref an) = get_analytics_role(env) {
+        if caller == an {
+            return Ok(());
+        }
+    }
+    Err(crate::errors::StreamError::NotAuthorized)
+}

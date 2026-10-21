@@ -396,4 +396,23 @@ mod test {
         let result = c.try_accept_admin(&wrong_admin);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_accept_admin_rejected_after_transfer_already_accepted() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &0u32);
+
+        let new_admin = Address::generate(&env);
+        c.propose_admin(&new_admin);
+
+        // First acceptance succeeds: pending admin becomes admin, pending cleared.
+        c.accept_admin(&new_admin);
+        assert_eq!(c.get_admin(), new_admin);
+
+        // Replaying accept_admin as the (now current) admin must be rejected
+        // because the pending-admin record is gone.
+        let result = c.try_accept_admin(&new_admin);
+        assert_eq!(result, Err(Ok(ProxyError::NotInitialized)));
+    }
 }

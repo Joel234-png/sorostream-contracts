@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Check stream test module declarations
+        run: python3 scripts/check_stream_test_modules.py
       - name: Check StreamError variant limit
         run: |
           count=$(grep -cE '^[[:space:]]+[[:alnum:]_]+ = [0-9]+,?$' contracts/stream/src/errors.rs)

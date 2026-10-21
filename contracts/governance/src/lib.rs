@@ -10,6 +10,9 @@
 //! 4. After the 48-hour timelock the proposal is executable via `execute`.
 //! 5. The guardian may `veto` a queued proposal before it executes.
 
+#[cfg(test)]
+mod test;
+
 use soroban_sdk::{
     contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
@@ -19,6 +22,7 @@ use soroban_sdk::{
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
 const GUARDIAN_KEY: &str = "guardian";
+const PENDING_GUARDIAN_KEY: &str = "pending_guardian";
 const TOKEN_KEY: &str = "token";
 const PROPOSAL_THRESHOLD_KEY: &str = "p_thresh";
 const QUORUM_KEY: &str = "quorum";
@@ -96,6 +100,10 @@ fn read_admin(env: &Env) -> Option<Address> {
 
 fn read_pending_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
+}
+
+fn read_pending_guardian(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_GUARDIAN_KEY))
 }
 
 fn check_admin(env: &Env) {
@@ -416,6 +424,40 @@ impl GovernanceContract {
         Ok(())
     }
 
+    /// Proposes a new guardian address. Only admin may call this.
+    ///
+    /// The proposed guardian must call [`accept_guardian`] to complete the
+    /// two-step transfer, mirroring the admin propose/accept flow and avoiding
+    /// an accidental lockout from a typo'd address.
+    pub fn propose_guardian(env: Env, new_guardian: Address) -> Result<(), GovernanceError> {
+        check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PENDING_GUARDIAN_KEY), &new_guardian);
+        env.events().publish(
+            (Symbol::new(&env, "GuardianTransferProposed"),),
+            new_guardian,
+        );
+        Ok(())
+    }
+
+    /// Accepts the guardian role. The pending guardian must call this.
+    pub fn accept_guardian(env: Env, accepted_by: Address) -> Result<(), GovernanceError> {
+        accepted_by.require_auth();
+        let pending = read_pending_guardian(&env)
+            .ok_or(GovernanceError::NotInitialized)?;
+        if accepted_by != pending {
+            return Err(GovernanceError::NotAdmin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, GUARDIAN_KEY), &accepted_by);
+        env.storage().instance().remove(&Symbol::new(&env, PENDING_GUARDIAN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "GuardianTransferAccepted"),),
+            accepted_by,
+        );
+        Ok(())
+    }
+
     /// Updates the proposal threshold. Only admin may call this.
     pub fn set_proposal_threshold(env: Env, threshold: u64) -> Result<(), GovernanceError> {
         check_admin(&env);
@@ -476,5 +518,68 @@ impl GovernanceContract {
             accepted_by,
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(GovernanceContract, ());
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
+        let c = GovernanceContractClient::new(&env, &contract_id);
+        assert!(c
+            .initialize(
+                &admin,
+                &guardian,
+                &token_id,
+                &100u64,
+                &10u64,
+                &0u64,
+                &0u64
+            )
+            .is_ok());
+        (env, contract_id, token_id)
+    }
+
+    #[test]
+    fn test_queue_on_already_defeated_proposal_rejected() {
+        let (env, contract_id, token_id) = setup();
+        let c = GovernanceContractClient::new(&env, &contract_id);
+        let proposer = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&proposer, &1000);
+
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "dummy");
+        let calldata = Bytes::new(&env);
+
+        env.ledger().set_timestamp(1000);
+        let proposal_id = c
+            .create_proposal(&proposer, &target, &function, &calldata)
+            .unwrap();
+
+        // advance time past the end of the voting period
+        env.ledger().set_timestamp(10_000_000);
+
+        // first queue: no votes cast, quorum not reached -> proposal defeated
+        let result = c.try_queue(&proposal_id);
+        assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
+        let proposal = c.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Defeated);
+
+        // second queue on an already-defeated proposal -> VotingNotActive,
+        // quorum is not re-evaluated
+        let result = c.try_queue(&proposal_id);
+        assert_eq!(result, Err(Ok(GovernanceError::VotingNotActive)));
     }
 }

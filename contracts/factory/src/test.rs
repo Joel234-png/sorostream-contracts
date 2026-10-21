@@ -84,6 +84,44 @@ fn test_get_admin_returns_none_before_init() {
 }
 
 #[test]
+fn test_propose_admin_same_as_current_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+
+    c.initialize(&admin);
+
+    // Proposing the current admin as the new admin is a no-op transfer.
+    let result = c.try_propose_admin(&admin);
+    assert!(result.is_err());
+    match result {
+        Err(Ok(e)) => assert_eq!(e, FactoryError::NewAdminSameAsCurrent),
+        _ => panic!("expected NewAdminSameAsCurrent"),
+    }
+}
+
+#[test]
+fn test_propose_admin_then_accept_admin_transfers() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let factory_id = env.register(StreamFactory, ());
+    let c = StreamFactoryClient::new(&env, &factory_id);
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    c.initialize(&admin);
+
+    c.propose_admin(&new_admin);
+    c.accept_admin(&new_admin);
+
+    assert_eq!(c.get_admin(), Some(new_admin));
+}
+
+#[test]
 fn test_deploy_not_initialized_rejected() {
     let env = Env::default();
     env.mock_all_auths();

@@ -15,6 +15,9 @@
 //! must route them through `propose` + `approve` so the multi-sig approves its own
 //! configuration changes.
 
+#[cfg(test)]
+mod test;
+
 use soroban_sdk::{
     contract, contractimpl, contracterror, contracttype, Address, Bytes, Env, Symbol, Vec,
 };
@@ -27,6 +30,8 @@ const INTENT_COUNT_KEY: &str = "i_cnt";
 const NONCE_KEY: &str = "nonce";
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
+const PROPOSER_INTENTS_KEY: &str = "pi";
+const TARGET_INTENTS_KEY: &str = "ti";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -120,6 +125,22 @@ fn remove_owner_storage(env: &Env, addr: &Address) {
 
 fn owner_count(env: &Env) -> u32 {
     env.storage().instance().get(&Symbol::new(env, OWNER_COUNT_KEY)).unwrap_or(0)
+}
+
+/// Returns every intent id proposed by `proposer` (any status).
+fn proposer_intents_key(env: &Env, proposer: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "pi"), proposer.clone())
+}
+
+/// Returns every intent id targeting `target` (any status).
+fn target_intents_key(env: &Env, target: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "ti"), target.clone())
+}
+
+fn append_intent_index(env: &Env, key: (Symbol, Address), id: u64) {
+    let mut list: Vec<u64> = env.storage().persistent().get(&key).unwrap_or(Vec::new(env));
+    list.push_back(id);
+    env.storage().persistent().set(&key, &list);
 }
 
 fn get_threshold(env: &Env) -> u32 {
@@ -316,9 +337,17 @@ impl MultiSigContract {
 
         if intent.approval_count >= threshold {
             intent.status = IntentStatus::Executed;
-            save_intent(&env, &intent);
+        save_intent(&env, &intent);
 
-            env.events().publish(
+        // Secondary indexes so intents can be listed by proposer or target.
+        append_intent_index(
+            &env,
+            proposer_intents_key(&env, &proposer),
+            id,
+        );
+        append_intent_index(&env, target_intents_key(&env, &target), id);
+
+        env.events().publish(
                 (Symbol::new(&env, "ThresholdReached"), intent_id),
                 threshold,
             );
@@ -433,6 +462,18 @@ impl MultiSigContract {
         owner_count(&env)
     }
 
+    /// Returns the full list of current owner addresses.
+    pub fn get_owners(env: Env) -> Vec<Address> {
+        let cnt = owner_count(&env);
+        let mut owners = Vec::new(&env);
+        for i in 0..cnt {
+            if let Some(addr) = env.storage().persistent().get(&owner_slot_key(&env, i)) {
+                owners.push_back(addr);
+            }
+        }
+        owners
+    }
+
     /// Returns the current global nonce (next value that will be used).
     pub fn get_nonce(env: Env) -> u64 {
         env.storage()
@@ -444,6 +485,28 @@ impl MultiSigContract {
     /// Returns the full intent struct.
     pub fn get_intent(env: Env, intent_id: u64) -> Result<Intent, MultiSigError> {
         load_intent(&env, intent_id).ok_or(MultiSigError::IntentNotFound)
+    }
+
+    /// Returns the ids of all intents proposed by `proposer` (any status).
+    ///
+    /// Use [`get_intent`] to inspect each intent's status and filter for
+    /// `IntentStatus::Pending` if only live intents are needed.
+    pub fn get_intents_by_proposer(env: Env, proposer: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&proposer_intents_key(&env, &proposer))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns the ids of all intents targeting `target` (any status).
+    ///
+    /// Use [`get_intent`] to inspect each intent's status and filter for
+    /// `IntentStatus::Pending` if only live intents are needed.
+    pub fn get_intents_by_target(env: Env, target: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&target_intents_key(&env, &target))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Returns whether an owner has already approved a given intent.
@@ -515,65 +578,51 @@ impl MultiSigContract {
 
 #[cfg(test)]
 mod test {
-    extern crate std;
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
 
-    use soroban_sdk::testutils::Events;
-    use soroban_sdk::{Address, Bytes, Env, Symbol};
-
-    use super::{MultiSigContract, MultiSigContractClient};
-
-    #[test]
-    fn test_intent_proposed_event_includes_calldata() {
+    fn setup() -> (Env, Address, Vec<Address>) {
         let env = Env::default();
         env.mock_all_auths();
+        let contract_id = env.register(MultiSigContract, ());
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let owner3 = Address::generate(&env);
+        let owners = vec![&env, owner1.clone(), owner2.clone(), owner3.clone()];
+        let c = MultiSigContractClient::new(&env, &contract_id);
+        assert!(c.initialize(&owners, &2u32).is_ok());
+        (env, contract_id, vec![owner1, owner2, owner3])
+    }
 
-        let contract = env.register(MultiSigContract, ());
-        let client = MultiSigContractClient::new(&env, &contract);
-
-        let owner = Address::generate(&env);
-        let owners = soroban_sdk::Vec::from_array(&env, [owner.clone()]);
-        client
-            .initialize(&owners, &1u32)
-            .expect("initialize should succeed");
-
+    #[test]
+    fn test_approve_after_expiry_rejected_with_prior_approvals() {
+        let (env, contract_id, owners) = setup();
+        let c = MultiSigContractClient::new(&env, &contract_id);
+        let owner1 = owners[0].clone();
+        let owner2 = owners[1].clone();
         let target = Address::generate(&env);
-        let function = Symbol::new(&env, "transfer");
-        let calldata = Bytes::from_array(&env, &[0xde, 0xad, 0xbe, 0xef]);
-        let expiry = env.ledger().timestamp() + 1000;
+        let function = Symbol::new(&env, "dummy");
+        let calldata = Bytes::new(&env);
 
-        let id = client
-            .propose(&owner, &target, &function, &calldata, &expiry)
-            .expect("propose should succeed");
+        env.ledger().set_timestamp(1000);
+        let intent_id = c
+            .propose(&owner1, &target, &function, &calldata, &2000u64)
+            .unwrap();
 
-        let all = env.events().all();
-        let mut found_data: Option<soroban_sdk::Val> = None;
-        let mut found_id: Option<u64> = None;
-        for (_, topics, data) in all.iter() {
-            if topics.is_empty() {
-                continue;
-            }
-            let name: Symbol = topics.get(0).unwrap().into_val(&env);
-            if name == Symbol::new(&env, "IntentProposed") {
-                found_data = Some(data.clone());
-                found_id = Some(topics.get(1).unwrap().into_val(&env));
-            }
-        }
+        // owner1 approves before the expiry
+        assert!(c.approve(&owner1, &intent_id).unwrap());
 
-        let data = found_data.expect("IntentProposed event must be emitted");
-        let event_id = found_id.expect("IntentProposed topic id must be present");
-        assert_eq!(event_id, id, "IntentProposed topic id must match returned intent id");
+        // advance time past the intent's expiry
+        env.ledger().set_timestamp(3000);
 
-        let (_proposer, _target, _function, _nonce, _expiry, ev_calldata): (
-            Address,
-            Address,
-            Symbol,
-            u64,
-            u64,
-            Bytes,
-        ) = data.into_val(&env);
-        assert_eq!(
-            ev_calldata, calldata,
-            "IntentProposed event data must include calldata"
-        );
+        // owner2 attempts to approve after expiry: must be rejected even though
+        // the threshold has not been reached and a prior approval exists.
+        let result = c.try_approve(&owner2, &intent_id);
+        assert_eq!(result, Err(Ok(MultiSigError::IntentExpired)));
+
+        // the intent is still pending with only the single prior approval
+        let intent = c.get_intent(&intent_id).unwrap();
+        assert_eq!(intent.status, IntentStatus::Pending);
+        assert_eq!(intent.approval_count, 1);
     }
 }

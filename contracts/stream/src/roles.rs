@@ -285,6 +285,12 @@ pub fn require_analytics_or_admin(
 
 /// Returns whether `caller` has any recognised admin role (super-admin, fee-manager,
 /// emergency-pause, token-admin, or analytics).
+///
+/// Storage reads are ordered by likely hit frequency so the common case
+/// short-circuits after the fewest reads: `FeeManager` is checked first because
+/// fee-related calls are typically the most frequent admin operation, while
+/// `Analytics` (read-only) is checked last. Each match returns early, skipping
+/// the remaining storage reads.
 pub fn has_any_role(env: &Env, caller: &Address, admin: &Address) -> bool {
     if caller == admin { return true; }
     if get_fee_manager(env).as_ref() == Some(caller) { return true; }

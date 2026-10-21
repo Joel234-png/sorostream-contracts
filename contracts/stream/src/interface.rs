@@ -23,10 +23,14 @@ pub trait SoroStreamInterface {
     fn get_version(env: Env) -> Result<String, StreamError>;
     fn set_admin(env: Env, new_admin: Address) -> Result<(), StreamError>;
     fn set_fee_admin(env: Env, admin: Address, fee_admin: Address) -> Result<(), StreamError>;
+    fn transfer_fee_manager_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn get_fee_admin(env: Env) -> Option<Address>;
     fn set_emergency_admin(env: Env, admin: Address, emergency_admin: Address) -> Result<(), StreamError>;
+    fn transfer_emergency_pause_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn get_emergency_admin(env: Env) -> Option<Address>;
+    fn transfer_analytics_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn set_token_admin(env: Env, admin: Address, token_admin: Address) -> Result<(), StreamError>;
+    fn transfer_token_admin_role(env: Env, admin: Address, old_holder: Address, new_holder: Address) -> Result<(), StreamError>;
     fn get_token_admin(env: Env) -> Option<Address>;
     fn emergency_pause(env: Env) -> Result<(), StreamError>;
     fn emergency_resume(env: Env) -> Result<(), StreamError>;
@@ -261,6 +265,12 @@ pub trait SoroStreamInterface {
     fn recipient_terminate(env: Env, stream_id: u64, recipient: Address) -> Result<(), StreamError>;
 
     fn get_stream(env: Env, stream_id: u64) -> Result<Stream, StreamError>;
+    fn estimate_stream_rent_cost(
+        env: Env,
+        stream_id: u64,
+        rent_rate_stroops_per_kib_per_ledger: i128,
+        ledgers: u32,
+    ) -> Result<i128, StreamError>;
     /// Returns up to the last 10 persisted lifecycle transitions, oldest first.
     fn get_stream_transitions(env: Env, stream_id: u64) -> Result<Vec<StreamTransition>, StreamError>;
     fn get_all_stream_ids(env: Env, start: u32, limit: u32) -> Vec<u64>;

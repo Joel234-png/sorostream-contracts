@@ -150,3 +150,25 @@ fn test_629_non_sender_cannot_update_metadata() {
     let result = c.update_metadata(&s.recipient, &stream_id, &blob);
     assert!(result.is_err(), "non-sender must be rejected");
 }
+
+#[test]
+fn test_629_get_stream_does_not_decode_legacy_inline_metadata() {
+    let s = setup_629();
+    let stream_id = make_stream(&s, 6);
+    let c = SoroStreamContractClient::new(&s.env, &s.contract);
+    let legacy_blob = Bytes::from_slice(&s.env, &[0xab_u8; 256]);
+
+    let mut stored_stream = storage::load_stream(&s.env, stream_id).unwrap();
+    stored_stream.options.metadata = legacy_blob.clone();
+    storage::save_stream(&s.env, &stored_stream);
+
+    let view = c.get_stream(&stream_id).unwrap();
+    assert_eq!(view.options.metadata, Bytes::new(&s.env));
+    assert_eq!(
+        storage::load_stream(&s.env, stream_id)
+            .unwrap()
+            .options
+            .metadata,
+        legacy_blob
+    );
+}

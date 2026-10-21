@@ -26,7 +26,7 @@
 mod test;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +47,9 @@ pub struct DeploymentInfo {
     pub deploy_timestamp: u64,
     /// WASM hash used for this deployment (encodes the contract version).
     pub wasm_hash: BytesN<32>,
+    /// Optional human-readable label supplied by the deployer (e.g.
+    /// "production-mainnet-v2") for dashboard identification.
+    pub label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +144,8 @@ impl StreamFactory {
     /// * `wasm_hash` - SHA-256 hash of the child contract WASM (previously
     ///   uploaded via `env.deployer().upload_contract_wasm()`).
     /// * `salt` - 32-byte salt used to derive the deterministic address.
+    /// * `label` - Optional human-readable label attached to the deployment
+    ///   (e.g. "production-mainnet-v2") for dashboard identification.
     ///
     /// # Returns
     /// The `Address` of the newly deployed child contract.
@@ -149,6 +154,7 @@ impl StreamFactory {
         admin: Address,
         wasm_hash: BytesN<32>,
         salt: BytesN<32>,
+        label: Option<String>,
     ) -> Result<Address, FactoryError> {
         // Auth + admin check.
         admin.require_auth();
@@ -174,6 +180,7 @@ impl StreamFactory {
             deploy_ledger: env.ledger().sequence(),
             deploy_timestamp: env.ledger().timestamp(),
             wasm_hash,
+            label,
         };
         env.storage()
             .persistent()

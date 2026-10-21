@@ -240,7 +240,14 @@ impl GovernanceContract {
 
         env.events().publish(
             (Symbol::new(&env, "ProposalCreated"), id),
-            (proposer, target, function, now, proposal.vote_end),
+            (
+                proposer,
+                target,
+                function,
+                now,
+                proposal.vote_end,
+                proposal.calldata.clone(),
+            ),
         );
 
         Ok(id)

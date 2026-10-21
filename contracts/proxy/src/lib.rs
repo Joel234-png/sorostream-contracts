@@ -146,6 +146,16 @@ impl ProxyContract {
         read_storage_version(&env)
     }
 
+    /// Returns the current implementation WASM hash and storage layout version
+    /// in a single call, so callers observe the implementation+version pairing
+    /// consistently (both are read together, as `upgrade()` writes them together).
+    pub fn get_impl_storage_info(env: Env) -> Result<(BytesN<32>, u32), ProxyError> {
+        Ok((
+            read_impl_hash(&env).ok_or(ProxyError::NotInitialized)?,
+            read_storage_version(&env),
+        ))
+    }
+
     /// Upgrades the implementation to a new WASM hash.
     ///
     /// `expected_storage_version` must match the currently stored version; this
@@ -237,6 +247,24 @@ mod test {
         assert_eq!(c.get_admin(), admin);
         assert_eq!(c.get_impl_hash(), impl_hash);
         assert_eq!(c.get_storage_version(), 0u32);
+    }
+
+    #[test]
+    fn test_get_impl_storage_info_returns_atomic_pair() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &1u32);
+
+        let (hash, version) = c.get_impl_storage_info();
+        assert_eq!(hash, impl_hash);
+        assert_eq!(version, 1u32);
+
+        let new_hash = BytesN::from_array(&env, &[2u8; 32]);
+        c.upgrade(&new_hash, &1u32, &2u32);
+
+        let (hash, version) = c.get_impl_storage_info();
+        assert_eq!(hash, new_hash);
+        assert_eq!(version, 2u32);
     }
 
     #[test]

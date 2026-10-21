@@ -35,7 +35,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, IssuerFlags, Ledger},
     token::StellarAssetClient,
-    Address, Env,
+    xdr::ToXdr, Address, Env,
 };
 
 struct TestEnv {
@@ -192,4 +192,32 @@ fn test_issue_661_ten_thousand_storage_reads_cost_baseline() {
         cpu / (OPS as u64)
     );
     assert!(cpu > 0);
+}
+
+#[test]
+fn test_stream_rent_estimate_uses_serialized_value_size() {
+    let t = setup();
+    let c = client(&t);
+    t.env.ledger().set_timestamp(0);
+    let stream_id = c.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_id,
+        &1_000_000,
+        &1000u64,
+        &false,
+        &default_params(1),
+    );
+
+    let stream = c.get_stream(&stream_id).unwrap();
+    let bytes = stream.to_xdr(&t.env).len() as i128;
+    let rent_rate = 10_000_i128;
+    let ledgers = 1_000_u32;
+    let expected = (bytes * rent_rate * ledgers as i128 + 1023) / 1024;
+
+    assert_eq!(
+        c.estimate_stream_rent_cost(&stream_id, &rent_rate, &ledgers)
+            .unwrap(),
+        expected
+    );
 }

@@ -117,7 +117,8 @@ pub struct StreamOptions {
     pub pause_reason: Option<String>,
     /// Total amount withdrawn from this stream so far.
     pub total_withdrawn: i128,
-    /// Optional metadata blob associated with the stream.
+    /// Legacy inline metadata slot retained for persisted-schema compatibility.
+    /// Current metadata blobs are stored separately and read via `get_metadata`.
     pub metadata: Bytes,
     /// Optional URI pointing to off-chain metadata (IPFS or HTTPS, max 128 bytes).
     pub metadata_uri: Option<String>,

@@ -11,7 +11,7 @@
 // * `deploy_stream_contract(admin, wasm_hash, salt)` deploys a new stream
 //   contract instance deterministically, records deployment metadata, and
 //   returns the new contract's `Address`.
-// * `get_deployed_contracts` returns all registered child addresses.
+// * `get_deployed_contracts(start, limit)` returns a bounded page of child addresses.
 // * `get_deployment_info` returns metadata for a single child contract.
 //
 // ## Storage layout
@@ -19,14 +19,18 @@
 // | Key                        | Type           | Description                        |
 // |----------------------------|----------------|------------------------------------|
 // | `Symbol("admin")`          | `Address`      | Factory admin                      |
-// | `Symbol("contracts")`      | `Vec<Address>` | Ordered list of deployed addresses |
+// | `Symbol("contract_count")` | `u32`          | Number of deployed addresses       |
+// | `(Symbol("contract"), u32)` | `Address`     | Address at a deployment index       |
 // | `(Symbol("info"), Address)` | `DeploymentInfo` | Per-contract metadata            |
 
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod storage_bench;
+
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +51,9 @@ pub struct DeploymentInfo {
     pub deploy_timestamp: u64,
     /// WASM hash used for this deployment (encodes the contract version).
     pub wasm_hash: BytesN<32>,
+    /// Optional human-readable label supplied by the deployer (e.g.
+    /// "production-mainnet-v2") for dashboard identification.
+    pub label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -56,14 +63,20 @@ pub struct DeploymentInfo {
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
 const CONTRACTS_KEY: &str = "contracts";
+const CONTRACTS_COUNT_KEY: &str = "contracts_count";
 const INFO_PREFIX: &str = "info";
+const MAX_DEPLOYMENT_PAGE_SIZE: u32 = 20;
 
 fn admin_key(env: &Env) -> Symbol {
     Symbol::new(env, ADMIN_KEY)
 }
 
-fn contracts_key(env: &Env) -> Symbol {
-    Symbol::new(env, CONTRACTS_KEY)
+fn contract_index_key(env: &Env, index: u32) -> (Symbol, u32) {
+    (Symbol::new(env, CONTRACT_PREFIX), index)
+}
+
+fn contracts_count_key(env: &Env) -> Symbol {
+    Symbol::new(env, CONTRACTS_COUNT_KEY)
 }
 
 fn info_key(env: &Env, addr: &Address) -> (Symbol, Address) {
@@ -94,6 +107,8 @@ pub enum FactoryError {
     Unauthorized = 2,
     /// Factory has not been initialised yet.
     NotInitialized = 3,
+    /// The proposed admin is the same as the current admin.
+    NewAdminSameAsCurrent = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +137,9 @@ impl StreamFactory {
         }
         admin.require_auth();
         env.storage().instance().set(&admin_key(&env), &admin);
+        env.storage()
+            .persistent()
+            .set(&contracts_count_key(&env), &0u32);
         Ok(())
     }
 
@@ -139,6 +157,8 @@ impl StreamFactory {
     /// * `wasm_hash` - SHA-256 hash of the child contract WASM (previously
     ///   uploaded via `env.deployer().upload_contract_wasm()`).
     /// * `salt` - 32-byte salt used to derive the deterministic address.
+    /// * `label` - Optional human-readable label attached to the deployment
+    ///   (e.g. "production-mainnet-v2") for dashboard identification.
     ///
     /// # Returns
     /// The `Address` of the newly deployed child contract.
@@ -147,6 +167,7 @@ impl StreamFactory {
         admin: Address,
         wasm_hash: BytesN<32>,
         salt: BytesN<32>,
+        label: Option<String>,
     ) -> Result<Address, FactoryError> {
         // Auth + admin check.
         admin.require_auth();
@@ -172,21 +193,24 @@ impl StreamFactory {
             deploy_ledger: env.ledger().sequence(),
             deploy_timestamp: env.ledger().timestamp(),
             wasm_hash,
+            label,
         };
         env.storage()
             .persistent()
             .set(&info_key(&env, &child_address), &info);
 
-        // Append to ordered list.
-        let mut list: Vec<Address> = env
+        // Store each address separately so append and paginated reads stay bounded.
+        let count: u32 = env
             .storage()
             .persistent()
-            .get(&contracts_key(&env))
-            .unwrap_or(Vec::new(&env));
-        list.push_back(child_address.clone());
+            .get(&Symbol::new(&env, CONTRACT_COUNT_KEY))
+            .unwrap_or(0);
         env.storage()
             .persistent()
             .set(&contracts_key(&env), &list);
+        env.storage()
+            .persistent()
+            .set(&contracts_count_key(&env), &list.len());
 
         Ok(child_address)
     }
@@ -195,12 +219,50 @@ impl StreamFactory {
     // Views
     // -----------------------------------------------------------------------
 
-    /// Returns all deployed child contract addresses in deployment order.
-    pub fn get_deployed_contracts(env: Env) -> Vec<Address> {
+    /// Returns a page of deployed child contract addresses in deployment order.
+    ///
+    /// `start` is the zero-based deployment index and `limit` is capped at 20.
+    pub fn get_deployed_contracts(env: Env, start: u32, limit: u32) -> Vec<Address> {
+        let count: u32 = env.storage()
+            .persistent()
+            .get(&Symbol::new(&env, CONTRACT_COUNT_KEY))
+            .unwrap_or(0);
+        let end = start
+            .saturating_add(limit.min(MAX_DEPLOYMENT_PAGE_SIZE))
+            .min(count);
+        let mut page = Vec::new(&env);
+
+        for index in start..end {
+            if let Some(address) = env
+                .storage()
+                .persistent()
+                .get(&contract_index_key(&env, index))
+            {
+                page.push_back(address);
+            }
+        }
+
+        page
+    }
+
+    /// Returns the number of deployed child contracts without loading the registry.
+    ///
+    /// For factories created before this count was persisted, falls back to the
+    /// registry length until the next deployment records the count.
+    pub fn get_deployed_contract_count(env: Env) -> u32 {
+        if let Some(count) = env
+            .storage()
+            .persistent()
+            .get(&contracts_count_key(&env))
+        {
+            return count;
+        }
+
         env.storage()
             .persistent()
-            .get(&contracts_key(&env))
+            .get::<_, Vec<Address>>(&contracts_key(&env))
             .unwrap_or(Vec::new(&env))
+            .len()
     }
 
     /// Returns deployment metadata for a single child contract address.
@@ -225,9 +287,16 @@ impl StreamFactory {
             .get(&admin_key(&env))
             .ok_or(FactoryError::NotInitialized)?;
         admin.require_auth();
+        if new_admin == admin {
+            return Err(FactoryError::NewAdminSameAsCurrent);
+        }
         env.storage()
             .instance()
             .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"),),
+            new_admin,
+        );
         Ok(())
     }
 
@@ -239,12 +308,21 @@ impl StreamFactory {
         if accepted_by != pending {
             return Err(FactoryError::Unauthorized);
         }
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&admin_key(&env))
+            .ok_or(FactoryError::NotInitialized)?;
         env.storage()
             .instance()
             .set(&admin_key(&env), &accepted_by);
         env.storage()
             .instance()
             .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 }

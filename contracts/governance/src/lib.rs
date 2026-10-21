@@ -10,6 +10,9 @@
 //! 4. After the 48-hour timelock the proposal is executable via `execute`.
 //! 5. The guardian may `veto` a queued proposal before it executes.
 
+#[cfg(test)]
+mod test;
+
 use soroban_sdk::{
     contract, contractimpl, contracterror, contracttype, token, Address, Bytes, Env, Symbol, Vec,
 };
@@ -19,6 +22,7 @@ use soroban_sdk::{
 const ADMIN_KEY: &str = "admin";
 const PENDING_ADMIN_KEY: &str = "pending_admin";
 const GUARDIAN_KEY: &str = "guardian";
+const PENDING_GUARDIAN_KEY: &str = "pending_guardian";
 const TOKEN_KEY: &str = "token";
 const PROPOSAL_THRESHOLD_KEY: &str = "p_thresh";
 const QUORUM_KEY: &str = "quorum";
@@ -44,6 +48,8 @@ pub enum ProposalStatus {
     Executed,
     /// Vetoed by the guardian during the timelock.
     Vetoed,
+    /// Execution was attempted but the target invocation failed; retryable via `execute`.
+    Failed,
 }
 
 #[contracttype]
@@ -86,6 +92,7 @@ pub enum GovernanceError {
     ProposalNotQueued = 10,
     InsufficientTokens = 11,
     InvalidParam = 12,
+    InvokeFailed = 13,
 }
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -96,6 +103,10 @@ fn read_admin(env: &Env) -> Option<Address> {
 
 fn read_pending_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&Symbol::new(env, PENDING_ADMIN_KEY))
+}
+
+fn read_pending_guardian(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&Symbol::new(env, PENDING_GUARDIAN_KEY))
 }
 
 fn check_admin(env: &Env) {
@@ -232,7 +243,14 @@ impl GovernanceContract {
 
         env.events().publish(
             (Symbol::new(&env, "ProposalCreated"), id),
-            (proposer, target, function, now, proposal.vote_end),
+            (
+                proposer,
+                target,
+                function,
+                now,
+                proposal.vote_end,
+                proposal.calldata.clone(),
+            ),
         );
 
         Ok(id)
@@ -328,12 +346,22 @@ impl GovernanceContract {
     /// Executes a queued proposal after the timelock has elapsed.
     ///
     /// Callable by anyone. Invokes `proposal.function` on `proposal.target` with
-    /// `proposal.calldata` as arguments.
+    /// `proposal.calldata` as a single raw `Bytes` argument, assuming the target
+    /// returns `()`. This is the generic "invoke a target with one raw `Bytes`
+    /// argument" execution convention shared with the multi-sig's `approve`.
+    ///
+    /// It is NOT the convention used by the main stream contract, whose entry
+    /// points take distinct typed parameters and return `Result<_, StreamError>`.
+    /// Consequently, a governance proposal (or multi-sig intent) cannot directly
+    /// invoke the stream contract's real entry points through this path; an
+    /// adapter accepting a single `Bytes` argument would be required.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let mut proposal = load_proposal(&env, proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Queued {
+        if proposal.status != ProposalStatus::Queued
+            && proposal.status != ProposalStatus::Failed
+        {
             return Err(GovernanceError::ProposalNotQueued);
         }
 
@@ -342,21 +370,36 @@ impl GovernanceContract {
             return Err(GovernanceError::TimelockNotExpired);
         }
 
-        proposal.status = ProposalStatus::Executed;
-        save_proposal(&env, &proposal);
-
-        env.invoke_contract::<()>(
+        let invoke_result = env.try_invoke_contract::<()>(
             &proposal.target,
             &proposal.function,
             Vec::from_array(&env, [soroban_sdk::IntoVal::into_val(&proposal.calldata, &env)]),
         );
 
-        env.events().publish(
-            (Symbol::new(&env, "ProposalExecuted"), proposal_id),
-            (),
-        );
+        match invoke_result {
+            Ok(()) => {
+                proposal.status = ProposalStatus::Executed;
+                save_proposal(&env, &proposal);
 
-        Ok(())
+                env.events().publish(
+                    (Symbol::new(&env, "ProposalExecuted"), proposal_id),
+                    (),
+                );
+
+                Ok(())
+            }
+            Err(_) => {
+                proposal.status = ProposalStatus::Failed;
+                save_proposal(&env, &proposal);
+
+                env.events().publish(
+                    (Symbol::new(&env, "ProposalFailed"), proposal_id),
+                    (),
+                );
+
+                Err(GovernanceError::InvokeFailed)
+            }
+        }
     }
 
     /// Vetoes a queued proposal. Only the guardian may call this.
@@ -405,6 +448,40 @@ impl GovernanceContract {
     pub fn set_guardian(env: Env, new_guardian: Address) -> Result<(), GovernanceError> {
         check_admin(&env);
         env.storage().instance().set(&Symbol::new(&env, GUARDIAN_KEY), &new_guardian);
+        Ok(())
+    }
+
+    /// Proposes a new guardian address. Only admin may call this.
+    ///
+    /// The proposed guardian must call [`accept_guardian`] to complete the
+    /// two-step transfer, mirroring the admin propose/accept flow and avoiding
+    /// an accidental lockout from a typo'd address.
+    pub fn propose_guardian(env: Env, new_guardian: Address) -> Result<(), GovernanceError> {
+        check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, PENDING_GUARDIAN_KEY), &new_guardian);
+        env.events().publish(
+            (Symbol::new(&env, "GuardianTransferProposed"),),
+            new_guardian,
+        );
+        Ok(())
+    }
+
+    /// Accepts the guardian role. The pending guardian must call this.
+    pub fn accept_guardian(env: Env, accepted_by: Address) -> Result<(), GovernanceError> {
+        accepted_by.require_auth();
+        let pending = read_pending_guardian(&env)
+            .ok_or(GovernanceError::NotInitialized)?;
+        if accepted_by != pending {
+            return Err(GovernanceError::NotAdmin);
+        }
+        env.storage().instance().set(&Symbol::new(&env, GUARDIAN_KEY), &accepted_by);
+        env.storage().instance().remove(&Symbol::new(&env, PENDING_GUARDIAN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "GuardianTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 
@@ -474,129 +551,62 @@ impl GovernanceContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        token::StellarAssetClient,
-        Address, Bytes, Env, Symbol,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env};
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 
-    struct TestEnv {
-        env: Env,
-        contract_id: Address,
-        token_id: Address,
-        admin: Address,
-        proposer: Address,
-    }
-
-    fn setup() -> TestEnv {
+    fn setup() -> (Env, Address, Address) {
         let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-
+        env.mock_all_auths();
         let contract_id = env.register(GovernanceContract, ());
         let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
         let token_admin = Address::generate(&env);
         let token_id = env
             .register_stellar_asset_contract_v2(token_admin.clone())
             .address();
+        let c = GovernanceContractClient::new(&env, &contract_id);
+        assert!(c
+            .initialize(
+                &admin,
+                &guardian,
+                &token_id,
+                &100u64,
+                &10u64,
+                &0u64,
+                &0u64
+            )
+            .is_ok());
+        (env, contract_id, token_id)
+    }
+
+    #[test]
+    fn test_queue_on_already_defeated_proposal_rejected() {
+        let (env, contract_id, token_id) = setup();
+        let c = GovernanceContractClient::new(&env, &contract_id);
         let proposer = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_id).mint(&proposer, &1000);
 
-        StellarAssetClient::new(&env, &token_id).mint(&proposer, &1_000_000);
+        let target = Address::generate(&env);
+        let function = Symbol::new(&env, "dummy");
+        let calldata = Bytes::new(&env);
 
-        GovernanceContractClient::new(&env, &contract_id).initialize(
-            &admin,
-            &admin,
-            &token_id,
-            &100u64,
-            &1u64,
-            &0u64,
-            &0u64,
-        );
+        env.ledger().set_timestamp(1000);
+        let proposal_id = c
+            .create_proposal(&proposer, &target, &function, &calldata)
+            .unwrap();
 
-        TestEnv {
-            env,
-            contract_id,
-            token_id,
-            admin,
-            proposer,
-        }
-    }
+        // advance time past the end of the voting period
+        env.ledger().set_timestamp(10_000_000);
 
-    fn client(t: &TestEnv) -> GovernanceContractClient<'_> {
-        GovernanceContractClient::new(&t.env, &t.contract_id)
-    }
+        // first queue: no votes cast, quorum not reached -> proposal defeated
+        let result = c.try_queue(&proposal_id);
+        assert_eq!(result, Err(Ok(GovernanceError::QuorumNotReached)));
+        let proposal = c.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Defeated);
 
-    /// #773 — proposer whose balance is exactly equal to `proposal_threshold`
-    /// must be accepted (only `(balance as u64) < threshold` is rejected).
-    #[test]
-    fn test_create_proposal_balance_exactly_threshold() {
-        let t = setup();
-        let c = client(&t);
-
-        c.set_proposal_threshold(&t.admin, &1_000_000u64);
-
-        let id = c.create_proposal(
-            &t.proposer,
-            &t.proposer,
-            &Symbol::new(&t.env, "fn"),
-            &Bytes::from_array(&t.env, &[1u8, 2, 3]),
-        );
-        assert_eq!(id, Ok(1u64));
-
-        let proposal = c.get_proposal(&1u64).unwrap();
-        assert_eq!(proposal.calldata, Bytes::from_array(&t.env, &[1u8, 2, 3]));
-    }
-
-    /// #773 — proposer whose balance is just below threshold is rejected.
-    #[test]
-    fn test_create_proposal_balance_below_threshold_rejected() {
-        let t = setup();
-        let c = client(&t);
-
-        c.set_proposal_threshold(&t.admin, &1_000_001u64);
-
-        let result = c.try_create_proposal(
-            &t.proposer,
-            &t.proposer,
-            &Symbol::new(&t.env, "fn"),
-            &Bytes::from_array(&t.env, &[1u8, 2, 3]),
-        );
-        assert_eq!(
-            result,
-            Err(Ok(GovernanceError::InsufficientTokens))
-        );
-    }
-
-    /// #775 — create_proposal with calldata approaching Soroban's practical
-    /// ledger-entry / transaction size limit is accepted gracefully (not a
-    /// panic) and the calldata is stored verbatim.
-    #[test]
-    fn test_create_proposal_max_practical_calldata() {
-        let t = setup();
-        let c = client(&t);
-
-        // ~100 KiB calldata payload.
-        let size: usize = 100_000;
-        let mut calldata = Bytes::new(&t.env);
-        let chunk: Vec<u8> = vec![42u8; 10_000];
-        for _ in 0..10 {
-            calldata.extend_from_slice(&chunk);
-        }
-        assert_eq!(calldata.len(), size as u32);
-
-        let result = c.try_create_proposal(
-            &t.proposer,
-            &t.proposer,
-            &Symbol::new(&t.env, "fn"),
-            &calldata,
-        );
-        assert!(
-            result.is_ok(),
-            "large calldata must be accepted gracefully, not panic"
-        );
-        let id = result.unwrap();
-
-        let proposal = c.get_proposal(&id).unwrap();
-        assert_eq!(proposal.calldata.len(), size as u32);
-        assert_eq!(proposal.calldata, calldata);
+        // second queue on an already-defeated proposal -> VotingNotActive,
+        // quorum is not re-evaluated
+        let result = c.try_queue(&proposal_id);
+        assert_eq!(result, Err(Ok(GovernanceError::VotingNotActive)));
     }
 }

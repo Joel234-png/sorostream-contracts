@@ -611,6 +611,14 @@ pub fn rate_limit_updated(env: &Env, window_seconds: u64, max_creations: u32) {
 }
 
 /// Emitted when a token is added to the whitelist.
+///
+/// The token whitelist is gated by the super-admin (`check_admin()`), not the
+/// `TokenAdmin` role. Indexers should track super-admin role history
+/// (`RoleAssigned`/`RoleRevoked` with `role_name == "SuperAdmin"`, which is the
+/// stored `admin` key) to determine which address is authorized to emit this
+/// event. Use [`crate::roles::get_token_admin`] / the `TokenAdmin`
+/// `role_assigned`/`role_revoked` events only for TokenAdmin-role assignment
+/// history, which is a separate concern from token-whitelist changes.
 pub fn token_whitelisted(env: &Env, token: &Address) {
     env.events().publish(
         (Symbol::new(env, "TokenWhitelisted"),),
@@ -619,6 +627,10 @@ pub fn token_whitelisted(env: &Env, token: &Address) {
 }
 
 /// Emitted when a token is removed from the whitelist.
+///
+/// See [`token_whitelisted`] for the role-gating notes: this event is emitted
+/// by `remove_token_from_whitelist`, which is gated by the super-admin
+/// (`check_admin()`), not the `TokenAdmin` role.
 pub fn token_dwhitelisted(env: &Env, token: &Address) {
     env.events().publish(
         (Symbol::new(env, "TokenDewhitelisted"),),
@@ -627,6 +639,10 @@ pub fn token_dwhitelisted(env: &Env, token: &Address) {
 }
 
 /// Emitted when token whitelist is toggled.
+///
+/// See [`token_whitelisted`] for the role-gating notes: this event is emitted
+/// by `set_token_whitelist_enabled`, which is gated by the super-admin
+/// (`check_admin()`), not the `TokenAdmin` role.
 pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
     env.events().publish(
         (Symbol::new(env, "TokenWhitelistToggled"),),
@@ -635,6 +651,10 @@ pub fn token_whitelist_toggled(env: &Env, enabled: bool) {
 }
 
 /// Emitted when a recipient is added to the allowlist.
+///
+/// The recipient allowlist is gated by the super-admin (`check_admin()`), not
+/// the `TokenAdmin` role. Indexers should track super-admin role history to
+/// determine which address is authorized to emit this event.
 pub fn recipient_allowlisted(env: &Env, recipient: &Address) {
     env.events().publish(
         (Symbol::new(env, "RecipientAllowlisted"),),
@@ -643,6 +663,9 @@ pub fn recipient_allowlisted(env: &Env, recipient: &Address) {
 }
 
 /// Emitted when a recipient is removed from the allowlist.
+///
+/// See [`recipient_allowlisted`] for the role-gating notes: gated by the
+/// super-admin (`check_admin()`), not the `TokenAdmin` role.
 pub fn recipient_disallowlisted(env: &Env, recipient: &Address) {
     env.events().publish(
         (Symbol::new(env, "RecipientDisallowlisted"),),
@@ -651,6 +674,9 @@ pub fn recipient_disallowlisted(env: &Env, recipient: &Address) {
 }
 
 /// Emitted when recipient allowlist is toggled globally.
+///
+/// See [`recipient_allowlisted`] for the role-gating notes: gated by the
+/// super-admin (`check_admin()`), not the `TokenAdmin` role.
 pub fn recipient_allowlist_toggled(env: &Env, enabled: bool) {
     env.events().publish(
         (Symbol::new(env, "RecipientAllowlistToggled"),),
@@ -1238,6 +1264,20 @@ pub fn role_revoked(env: &Env, role_name: &String, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "RoleRevoked"),),
         (role_name.clone(), admin.clone()),
+    );
+}
+
+/// Emitted when the super-admin atomically transfers a role between addresses.
+pub fn role_transferred(
+    env: &Env,
+    role_name: &String,
+    old_holder: &Address,
+    new_holder: &Address,
+    admin: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "RoleTransferred"),),
+        (role_name.clone(), old_holder.clone(), new_holder.clone(), admin.clone()),
     );
 }
 

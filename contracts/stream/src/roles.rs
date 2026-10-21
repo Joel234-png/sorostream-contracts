@@ -306,6 +306,16 @@ pub fn require_token_admin_or_admin(
 }
 
 /// Checks that `caller` holds the `Analytics` role **or** is the super-admin.
+///
+/// # Read-only intent
+///
+/// This helper exists solely to gate the documented read-only Analytics entry
+/// points (`get_stats`, `get_protocol_stats`, and the audit log).  It MUST NOT
+/// be attached to any state-changing entry point: the Analytics role is
+/// documented as read-only, and using this helper on a write operation would
+/// silently grant write access to analytics holders.  If you need to gate a
+/// new admin entry point, choose the role-specific helper that matches its
+/// privilege level (or `SuperAdmin`) instead.
 pub fn require_analytics_or_admin(
     env: &Env,
     caller: &Address,

@@ -72,7 +72,24 @@ pub fn compute_refund(
     Some(deposit.saturating_sub(total_streamed))
 }
 
-/// Computes flow rate from deposit and duration (integer division, floors).
+#[cfg(test)]
+mod issue_841_tests {
+    use super::*;
+
+    #[test]
+    fn compute_refund_before_start_returns_full_deposit() {
+        // now strictly before start_time: nothing streamed yet.
+        let deposit = 1000i128;
+        let duration = 100u64;
+        let start_time = 1000u64;
+        let now = 500u64; // before start
+        let end_time = start_time + duration;
+        let flow_rate = compute_flow_rate(deposit, duration);
+        let refund = compute_refund(deposit, flow_rate, now, end_time, start_time).unwrap();
+        assert_eq!(refund, deposit, "refund must be full deposit when now < start_time");
+    }
+}
+
 pub fn compute_flow_rate(deposit: i128, duration_seconds: u64) -> i128 {
     deposit / duration_seconds as i128
 }

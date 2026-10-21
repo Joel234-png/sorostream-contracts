@@ -216,6 +216,33 @@ fn test_cancel_splits_vested_and_remainder() {
 }
 
 #[test]
+fn test_cancel_saturates_refund_when_claimed_and_claimable_exceed_deposit() {
+    let t = TestEnv::new();
+    let client = t.client();
+    let start = t.now();
+    let stream_id = client.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token,
+        &1_000_i128,
+        &start,
+        &(start + 1_000),
+        &false,
+    );
+
+    let mut stream = storage::get_stream(&t.env, stream_id);
+    stream.claimed = 999;
+    stream.rate_per_second = 1_001;
+    storage::save_stream(&t.env, stream_id, &stream);
+    t.set_time(start + 1);
+
+    client.cancel(&stream_id);
+
+    assert_eq!(t.token_client().balance(&t.recipient), 2);
+    assert_eq!(t.token_client().balance(&t.sender), 9_999_000);
+}
+
+#[test]
 #[should_panic(expected = "stream already cancelled")]
 fn test_double_cancel_panics() {
     let t = TestEnv::new();

@@ -25,7 +25,7 @@ pub use errors::StreamError;
 pub use types::{AuditEntry, CreateStreamOptions, CreateStreamParams, HealthStatus, Stats, Stream, StreamHealth, StreamOptions, StreamStatus, StreamTransition, VestingCurve, StreamQueryFilter, WithdrawalProof, WithdrawalRecord};
 pub use oracle::IPriceOracle;
 pub use composability::ISoroStreamComposability;
-pub use roles::AdminRole;
+pub use roles::{AdminRole, RoleHolders};
 
 #[cfg(test)] mod integration_tests;
 // other test modules disabled during grace-period test restore
@@ -48,7 +48,7 @@ pub use roles::AdminRole;
 #[cfg(test)] mod issue_620_tests;
 #[cfg(test)] mod issue_656_chaos_tests;
 #[cfg(test)] mod issue_661_tests;
-#[cfg(test)] mod issue_763_tests;
+#[cfg(test)] mod role_holders_tests;
 
 use soroban_sdk::{
     contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec, Symbol, IntoVal,
@@ -795,6 +795,15 @@ impl SoroStreamContract {
     /// Returns the currently assigned `TokenAdmin` address, or `None`.
     pub fn get_token_admin(env: Env) -> Option<Address> {
         roles::get_token_admin(&env)
+    }
+
+    /// Returns all currently-assigned admin roles in a single view (Issue #753).
+    ///
+    /// Aggregates the super-admin and every fine-grained role (fee manager,
+    /// emergency pause, analytics, token admin) so a caller can assemble the
+    /// full picture of who holds what with one invocation instead of five.
+    pub fn get_role_holders(env: Env) -> RoleHolders {
+        roles::get_role_holders(&env)
     }
 
     pub fn set_fee_admin(env: Env, admin: Address, fee_admin: Address) -> Result<(), StreamError> {

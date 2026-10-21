@@ -303,6 +303,34 @@ mod test {
     }
 
     #[test]
+    fn test_upgrade_accepts_new_storage_version_lower_than_current() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &5u32);
+
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        // expected matches current (5), but new_storage_version (3) moves backward
+        let result = c.try_upgrade(&new_hash, &5u32, &3u32);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(c.get_impl_hash(), new_hash);
+        assert_eq!(c.get_storage_version(), 3u32);
+    }
+
+    #[test]
+    fn test_upgrade_accepts_new_storage_version_equal_to_current() {
+        let (env, contract_id, admin, impl_hash) = setup();
+        let c = ProxyContractClient::new(&env, &contract_id);
+        c.initialize(&admin, &impl_hash, &5u32);
+
+        let new_hash = BytesN::from_array(&env, &[9u8; 32]);
+        // expected matches current (5), new_storage_version equals current (5)
+        let result = c.try_upgrade(&new_hash, &5u32, &5u32);
+        assert_eq!(result, Ok(Ok(())));
+        assert_eq!(c.get_impl_hash(), new_hash);
+        assert_eq!(c.get_storage_version(), 5u32);
+    }
+
+    #[test]
     fn test_set_admin_transfers_role() {
         let (env, contract_id, admin, impl_hash) = setup();
         let c = ProxyContractClient::new(&env, &contract_id);

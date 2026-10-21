@@ -97,6 +97,8 @@ pub enum FactoryError {
     Unauthorized = 2,
     /// Factory has not been initialised yet.
     NotInitialized = 3,
+    /// The proposed admin is the same as the current admin.
+    NewAdminSameAsCurrent = 4,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,9 +234,16 @@ impl StreamFactory {
             .get(&admin_key(&env))
             .ok_or(FactoryError::NotInitialized)?;
         admin.require_auth();
+        if new_admin == admin {
+            return Err(FactoryError::NewAdminSameAsCurrent);
+        }
         env.storage()
             .instance()
             .set(&Symbol::new(&env, PENDING_ADMIN_KEY), &new_admin);
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferProposed"),),
+            new_admin,
+        );
         Ok(())
     }
 
@@ -252,6 +261,10 @@ impl StreamFactory {
         env.storage()
             .instance()
             .remove(&Symbol::new(&env, PENDING_ADMIN_KEY));
+        env.events().publish(
+            (Symbol::new(&env, "AdminTransferAccepted"),),
+            accepted_by,
+        );
         Ok(())
     }
 }
